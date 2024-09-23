@@ -2,6 +2,8 @@ import scipy
 import warnings
 import numpy as np
 import pandas as pd
+from collections import Counter
+from typing import List, Tuple
 from typing import Union, List
 import sklearn
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -182,4 +184,137 @@ class PredictionReducer(BaseEstimator, TransformerMixin):
     
     def get_feature_names_out(self, input_features=None) -> List[str]:
         return [f"reduced_prediction_{i}" for i in range(self.n_models)] if not input_features else input_features
-    
+
+
+from collections import Counter
+import numpy as np
+from sklearn.base import BaseEstimator, RegressorMixin
+
+class Meta(BaseEstimator, RegressorMixin):
+    def __init__(
+            self,
+            task_type: int,
+            ensemble_size: int = 50,
+            random_state: int = None,
+    ):
+        """Meta Ensemble
+
+        Parameters:
+        -----------
+        task_type : int
+            The task type, typically 1 for classification, 2 for regression.
+
+        ensemble_size : int
+            Number of models to include in the ensemble.
+
+        random_state : int
+            Seed for reproducibility.
+        """
+        self.ensemble_size = ensemble_size
+        self.task_type = task_type
+        self.random_state = random_state
+        self.random_generator = np.random.RandomState(random_state) if random_state else np.random.RandomState()
+        self.indices_ = []
+        self.weights_ = None
+
+    def fit(
+            self,
+            base_models_predictions: np.ndarray,
+            true_targets: np.ndarray,
+    ) -> 'Meta':
+        """Fit the ensemble by selecting base models based on their performance.
+
+        Parameters:
+        -----------
+        base_models_predictions : np.ndarray
+            Predictions of the base models, shape: (n_samples, n_models)
+
+        true_targets : np.ndarray
+            True labels/targets for the task, shape: (n_samples,)
+
+        Returns:
+        --------
+        self
+        """
+        # Check that the ensemble size is valid
+        if self.ensemble_size < 1:
+            raise ValueError("Ensemble size cannot be less than one!")
+
+        n_samples, n_models = base_models_predictions.shape
+
+        # Initialize ensemble predictions and other attributes
+        self.indices_ = []  # Store selected model indices
+        self.trajectory_ = []  # Losses after each iteration
+        self.weights_ = np.zeros(n_models)  # Model weights in the final ensemble
+
+        current_ensemble_predictions = np.zeros(n_samples)  # Initial empty ensemble predictions
+
+        for _ in range(self.ensemble_size):
+            best_loss = float("inf")
+            best_model_idx = None
+
+            # Iterate through all models to find the one that minimizes the loss when added to the ensemble
+            for idx in range(n_models):
+                model_predictions = base_models_predictions[:, idx]
+                # Combine current ensemble predictions with this model's predictions
+                combined_predictions = (current_ensemble_predictions + model_predictions) / (len(self.indices_) + 1)
+
+                # Calculate loss for this combined model
+                loss = self._calculate_loss(combined_predictions, true_targets)
+
+                # If this model improves the performance, select it as the best model
+                if loss < best_loss:
+                    best_loss = loss
+                    best_model_idx = idx
+
+            # Add the best model's predictions to the ensemble
+            self.indices_.append(best_model_idx)
+            current_ensemble_predictions += base_models_predictions[:, best_model_idx]
+            self.trajectory_.append(best_loss)
+
+        # Calculate final model weights based on the frequency of their selection
+        self._calculate_weights()
+        return self
+
+    def _calculate_loss(self, predictions: np.ndarray, true_targets: np.ndarray) -> float:
+        """Calculate the loss of predictions with respect to the true targets."""
+        if self.task_type == 1:  # Classification (accuracy)
+            correct = np.sum(np.argmax(predictions, axis=1) == true_targets)
+            accuracy = correct / len(true_targets)
+            return 1 - accuracy  # We want to minimize the loss (1 - accuracy)
+        elif self.task_type == 2:  # Regression (mean squared error)
+            return np.mean((predictions - true_targets) ** 2)
+        else:
+            raise ValueError("Unknown task type!")
+
+    def _calculate_weights(self) -> None:
+        """Calculate the weights of the models based on their frequency of selection in the ensemble."""
+        ensemble_members = Counter(self.indices_).most_common()
+        total_counts = sum(count for idx, count in ensemble_members)
+        self.weights_ = np.zeros_like(self.weights_)
+        for idx, count in ensemble_members:
+            weight = float(count) / total_counts
+            self.weights_[idx] = weight
+
+    def predict(self, base_models_predictions: np.ndarray) -> np.ndarray:
+        """Create ensemble predictions from the base model predictions using the selected model weights.
+
+        Parameters:
+        -----------
+        base_models_predictions : np.ndarray
+            Predictions of the base models, shape: (n_samples, n_models)
+
+        Returns:
+        --------
+        np.ndarray
+            Final ensemble predictions.
+        """
+        average = np.zeros(base_models_predictions.shape[0], dtype=np.float64)
+        for idx, weight in enumerate(self.weights_):
+            if weight > 0.0:
+                average += base_models_predictions[:, idx] * weight
+        return average
+
+    def get_validation_performance(self) -> float:
+        """Return the final validation performance (loss) of the ensemble."""
+        return self.trajectory_[-1]

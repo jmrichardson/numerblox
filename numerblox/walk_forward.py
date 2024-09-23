@@ -1,6 +1,5 @@
 import os
 import hashlib
-import base64
 import pickle
 import numpy as np
 import pandas as pd
@@ -8,7 +7,7 @@ from sklearn.base import BaseEstimator, RegressorMixin
 from joblib import load
 from tqdm import tqdm
 from numerblox.evaluation import NumeraiClassicEvaluator
-
+from collections import Counter
 
 # Cache function provided by user, with improvements
 def _cache(*args, **kwds):
@@ -34,14 +33,14 @@ def _check_sklearn_compatibility(model):
 # Walk-forward training class
 class WalkForward(BaseEstimator, RegressorMixin):
 
-    def __init__(self, model_paths, n_eras=52, cache_dir=None, era_column="era", ensemble=None, model_save_path=None, metrics_list=None):
+    def __init__(self, model_paths, cache_dir=None, era_column="era", meta_eras=[1,3,12], model_save_path=None,
+                 metrics_list=None):
         """
         Parameters:
         - model_paths: List of paths to pre-trained sklearn models (.pkl)
-        - n_eras: Number of last eras to iterate over (for walk-forward iteration)
         - cache_dir: Directory to save cached results (if None, no caching will be done)
         - era_column: Column name in X that contains the era indicator
-        - ensemble: Instance of ensemble class for ensemble selection
+        - meta_eras: List of integers specifying window sizes for meta models
         - model_save_path: Path to save the last trained model for each era (default: None)
         - metrics_list: List of metrics to use for evaluation (default: None)
         """
@@ -50,13 +49,12 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.model_paths = model_paths
         self.models = [self._load_model(path) for path in model_paths]  # Load models from disk with validation
         self.model_names = [os.path.basename(path).replace('.pkl', '') for path in model_paths]  # Extract model names
-        self.n_eras = n_eras
         self.cache_dir = cache_dir
         self.era_column = era_column
         self.oof_predictions = []
         self.oof_targets = []
         self.eras_trained_on = []
-        self.ensemble = ensemble  # Ensemble instance passed from outside
+        self.meta_eras = meta_eras  # List of window sizes for meta models
         self.model_save_path = model_save_path  # Path where models will be saved after last era (if provided)
         self.metrics_list = metrics_list or ["mean_std_sharpe", "apy", "max_drawdown"]
 
@@ -78,7 +76,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
     def _load_model(self, path):
         """Load a model from the given path and check its compatibility with sklearn."""
         print(f"Loading model from: {path}")
-        model = load(path)
+        with open(path, 'rb') as f:
+            model = pickle.load(f)
         _check_sklearn_compatibility(model)
         return model
 
@@ -90,88 +89,77 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 pickle.dump(model, f)
             print(f"Saved trained model: {model_name} to {model_path}")
 
-    def fit(self, X, y):
+    def fit(self, X_train, y_train, X_test, y_test):
         """
-        Iteratively trains on past data and makes out-of-sample (OOF) predictions.
+        Fits the models on provided training data and generates out-of-sample (OOF) predictions.
 
         Parameters:
-        - X: DataFrame containing feature columns and an 'era' column.
-        - y: Series or array containing the target values.
+        - X_train: DataFrame containing training feature columns and an 'era' column.
+        - y_train: Series or array containing the training target values.
+        - X_test: DataFrame containing testing feature columns and an 'era' column.
+        - y_test: Series or array containing the test target values.
         """
-        print(f"Starting walk-forward training over the last {self.n_eras} eras")
+        print("Starting training and walk-forward prediction")
 
-        # Extract unique eras from the data
-        eras = sorted(X[self.era_column].unique())
+        # Extract unique eras from test data
+        eras_test = sorted(X_test[self.era_column].unique())
 
-        benchmark_predictions = pd.DataFrame(index=X.index)
+        # Initialize train_data and train_targets
+        train_data = X_train.drop(columns=[self.era_column])  # Initial training data
+        train_targets = y_train
 
-        total_tasks = len(self.model_names) * self.n_eras  # Total tasks (model * era)
+        # Benchmark DataFrame to collect predictions
+        benchmark_predictions = pd.DataFrame(index=X_test.index)
 
+        total_tasks = len(self.model_names) * len(eras_test)  # Models * test eras
         task_count = 0  # To track progress
 
-        # Use tqdm to track progress over eras and models
-        for i in tqdm(range(-self.n_eras, 0), desc="Walk-forward training"):  # Iterate over the last n_eras
-            test_era = eras[i]  # The current era used for testing
-            print(f"Processing era: {test_era}")
+        # Use tqdm to track progress over test eras and models
+        for test_era in tqdm(eras_test, desc="Walk-forward training"):
+            print(f"Processing test era: {test_era}")
 
-            # Training data: all data up to but not including test_era
-            train_data = X[X[self.era_column] < test_era].drop(columns=[self.era_column])
-            train_targets = y[train_data.index]
-
-            # Test data: data corresponding to test_era
-            test_data = X[X[self.era_column] == test_era].drop(columns=[self.era_column])
-            test_targets = y[test_data.index]
+            # Test data: data corresponding to the test_era
+            test_data = X_test[X_test[self.era_column] == test_era].drop(
+                columns=[self.era_column])  # Drop the 'era' column
+            test_targets = y_test[test_data.index]
 
             # Check if train_data and test_data are not empty
             if train_data.empty or test_data.empty:
                 raise ValueError(f"Empty training or testing data for era {test_era}. Please check your data!")
 
+            # Initialize DataFrame to collect predictions for current era
+            combined_predictions = pd.DataFrame(index=test_data.index)
+
             # Loop through models to train and predict
             for model, model_name in zip(self.models, self.model_names):
                 task_count += 1
-                print(f"Training model: {model_name} on era: {test_era} ({task_count}/{total_tasks})")
+                print(f"Processing model: {model_name} on test era: {test_era} ({task_count}/{total_tasks})")
 
-                # Skip training if it's the first test era, but still get predictions
-                if i == -self.n_eras:  # If it's the first test era, skip training and only get predictions
-                    print(f"Skipping training for the first test era: {test_era} for model: {model_name}")
-                    # Get predictions using the pre-trained model
-                    test_predictions = pd.Series(model.predict(test_data), index=test_data.index, name=model_name)
+                # Cache handling for model predictions
+                cache_id = [train_data.shape, test_era]
+                cache_hash = _cache(cache_id)
+                cache_file = os.path.join(self.cache_dir,
+                                          f"{test_era}_{model_name}_{cache_hash}.pkl") if self.cache_dir else None
+
+                if cache_file and os.path.exists(cache_file):
+                    # Load cached predictions if available
+                    with open(cache_file, 'rb') as f:
+                        test_predictions = pickle.load(f)
+                    print(f"Loaded cached predictions for era {test_era} and model {model_name} from {cache_file}")
                 else:
-                    # Train the model for subsequent test eras
-                    if self.cache_dir is not None:
-                        # Generate cache hash based on training data shape and test_era
-                        cache_id = [train_data.shape, test_era]
-                        cache_hash = _cache(cache_id)
-                        cache_file = os.path.join(self.cache_dir, f"{test_era}_{model_name}_{cache_hash}.pkl")
+                    # Train the model on the training data and predict on the test era
+                    print(f"Training model: {model_name} and generating predictions for test era {test_era}")
+                    model.fit(train_data, train_targets)
+                    test_predictions = pd.Series(model.predict(test_data),
+                                                 index=test_data.index, name=model_name)
+                    # Save predictions to cache if applicable
+                    if cache_file:
+                        with open(cache_file, 'wb') as f:
+                            pickle.dump(test_predictions, f)
+                        print(f"Saved predictions for era {test_era} and model {model_name} to cache {cache_file}")
 
-                        if os.path.exists(cache_file):
-                            # Load cached predictions if available
-                            with open(cache_file, 'rb') as f:
-                                test_predictions = pickle.load(f)
-                            print(
-                                f"Loaded cached predictions for era {test_era} and model {model_name} from {cache_file}")
-                        else:
-                            # Train the model on training data and predict on the test era (out-of-sample)
-                            print(f"Training model: {model_name} and generating predictions for era {test_era}")
-                            test_predictions = pd.Series(model.fit(train_data, train_targets).predict(test_data),
-                                                         index=test_data.index, name=model_name)
-                            # Save the predictions to cache
-                            with open(cache_file, 'wb') as f:
-                                pickle.dump(test_predictions, f)
-                            print(f"Saved predictions for era {test_era} and model {model_name} to cache {cache_file}")
-                    else:
-                        # No caching, train and predict directly
-                        print(f"No caching. Training model {model_name} and generating predictions for era {test_era}")
-                        test_predictions = pd.Series(model.fit(train_data, train_targets).predict(test_data),
-                                                     index=test_data.index, name=model_name)
-
-                # If we already have predictions from other models, append current model predictions
-                if task_count % len(self.model_names) == 1:
-                    # If it's the first model for this era, create new DataFrame
-                    combined_predictions = pd.DataFrame(test_predictions)
-                else:
-                    # Otherwise, add the current model's predictions to the existing DataFrame
-                    combined_predictions[model_name] = test_predictions
+                # Add the current model's predictions to the combined DataFrame
+                combined_predictions[model_name] = test_predictions
 
             # Ensure that all OOF predictions are aligned by reindexing
             combined_predictions = combined_predictions.reindex(test_data.index)
@@ -184,35 +172,55 @@ class WalkForward(BaseEstimator, RegressorMixin):
             # Collect original model benchmark predictions
             benchmark_predictions.loc[test_data.index, 'benchmark'] = self.models[0].predict(test_data)
 
+            # After base model predictions, create meta models
+            for window_size in self.meta_eras:
+                if len(self.oof_predictions) >= window_size:
+                    print(f"Creating meta model with window size: {window_size}")
+                    # Collect OOF predictions and targets from the last 'window_size' eras
+                    recent_oof_preds_list = self.oof_predictions[-window_size:]
+                    recent_oof_preds = pd.concat(recent_oof_preds_list)
+                    recent_oof_targets = np.concatenate(self.oof_targets[-window_size:])
+                    recent_eras = self.eras_trained_on[-window_size:]
+
+                    # Prepare base model predictions as numpy array
+                    base_models_predictions = recent_oof_preds.values  # shape: (n_samples, n_models)
+                    true_targets = recent_oof_targets  # shape: (n_samples,)
+
+                    # Create Meta model
+                    meta_model = Meta(task_type=2, ensemble_size=5)
+                    meta_model.fit(base_models_predictions, true_targets)
+
+                    # Save the meta model
+                    meta_model_name = f"meta_model_{window_size}"
+                    meta_model_path = os.path.join(self.model_save_path or "", f"{meta_model_name}.pkl")
+                    with open(meta_model_path, 'wb') as f:
+                        pickle.dump(meta_model, f)
+                    print(f"Saved meta model: {meta_model_name} to {meta_model_path}")
+
+                    # Use meta model to predict on current test_data
+                    base_test_preds = combined_predictions.values  # shape: (n_samples, n_models)
+                    meta_predictions = meta_model.predict(base_test_preds)
+                    # Add meta predictions to combined_predictions
+                    combined_predictions[meta_model_name] = meta_predictions
+
+                    # Add meta model to models list if not already present
+                    if meta_model_name not in self.model_names:
+                        self.models.append(meta_model)
+                        self.model_names.append(meta_model_name)
+
+            # Append the test data and corresponding targets to the training data for future iterations
+            # Include the era column back to test_data for concatenation
+            test_data_with_era = test_data.copy()
+            test_data_with_era[self.era_column] = test_era
+            train_data = pd.concat([train_data, test_data])
+            train_targets = pd.concat([train_targets, test_targets])
+
         # After iterating over all eras, concatenate OOF predictions and targets
         all_oof_predictions = pd.concat(self.oof_predictions)
         all_oof_targets = np.concatenate(self.oof_targets)
 
-        # Train and save the final model only if model_save_path is provided
-        if self.model_save_path is not None:
-            print("Training the final model on all data")
-            final_train_data = X.drop(columns=[self.era_column])
-            final_train_targets = y
-            final_model = self.models[0].fit(final_train_data, final_train_targets)
-
-            # Save the final model trained on all eras
-            final_model_name = self.model_names[0]  # Assuming you're saving the primary model
-            model_save_file = os.path.join(self.model_save_path, f"final_{final_model_name}.pkl")
-            with open(model_save_file, 'wb') as f:
-                pickle.dump(final_model, f)
-            print(f"Saved the final model trained on all eras to {model_save_file}")
-
-        # Perform ensemble selection using the ensemble class (if provided)
-        if self.ensemble:
-            print("Performing ensemble selection")
-            self.ensemble.fit(all_oof_predictions.values, all_oof_targets)
-            print("Ensemble selection completed")
-
-        # Store benchmark predictions
-        self.benchmark_predictions = benchmark_predictions
-
-        # Evaluate
-        self.evaluate(X, y)
+        # Perform evaluation
+        self.evaluate(X_test, y_test)
 
         return self
 
@@ -276,21 +284,24 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
     def predict(self, X):
         """
-        Predict using the ensemble model (if available).
+        Predict using the models including meta models.
 
         Parameters:
         - X: DataFrame to predict on (same format as during training).
         """
         print("Generating predictions using the models")
 
-        test_predictions = pd.DataFrame(
+        # Collect predictions from base models
+        base_model_predictions = pd.DataFrame(
             {model_name: model.predict(X.drop(columns=[self.era_column])) for model, model_name in
-             zip(self.models, self.model_names)},
+             zip(self.models[:len(self.model_paths)], self.model_names[:len(self.model_paths)])},
             index=X.index
         )
 
-        if self.ensemble:
-            print("Using ensemble to generate final predictions")
-            return self.ensemble.predict(test_predictions.values)
-        else:
-            return test_predictions  # Return individual model predictions if no ensemble is provided
+        # Collect predictions from meta models
+        for model, model_name in zip(self.models[len(self.model_paths):], self.model_names[len(self.model_paths):]):
+            base_preds_array = base_model_predictions.values  # shape: (n_samples, n_models)
+            meta_predictions = model.predict(base_preds_array)
+            base_model_predictions[model_name] = meta_predictions
+
+        return base_model_predictions
