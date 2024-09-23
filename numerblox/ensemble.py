@@ -188,7 +188,10 @@ class PredictionReducer(BaseEstimator, TransformerMixin):
 
 from collections import Counter
 import numpy as np
+import pandas as pd
 from sklearn.base import BaseEstimator, RegressorMixin
+from sklearn.ensemble import VotingRegressor
+import pickle
 
 class Meta(BaseEstimator, RegressorMixin):
     def __init__(
@@ -213,24 +216,30 @@ class Meta(BaseEstimator, RegressorMixin):
         self.ensemble_size = ensemble_size
         self.task_type = task_type
         self.random_state = random_state
-        self.random_generator = np.random.RandomState(random_state) if random_state else np.random.RandomState()
         self.indices_ = []
         self.weights_ = None
+        self.selected_model_names = []
+        self.selected_models = []
+        self.ensemble_model = None  # This will be the VotingRegressor
 
     def fit(
             self,
-            base_models_predictions: np.ndarray,
-            true_targets: np.ndarray,
+            base_models_predictions: pd.DataFrame,
+            true_targets: pd.Series,
+            model_name_to_path: dict,
     ) -> 'Meta':
         """Fit the ensemble by selecting base models based on their performance.
 
         Parameters:
         -----------
-        base_models_predictions : np.ndarray
+        base_models_predictions : pd.DataFrame
             Predictions of the base models, shape: (n_samples, n_models)
 
-        true_targets : np.ndarray
+        true_targets : pd.Series
             True labels/targets for the task, shape: (n_samples,)
+
+        model_name_to_path : dict
+            Mapping from model names to model file paths
 
         Returns:
         --------
@@ -243,21 +252,21 @@ class Meta(BaseEstimator, RegressorMixin):
         n_samples, n_models = base_models_predictions.shape
 
         # Initialize ensemble predictions and other attributes
-        self.indices_ = []  # Store selected model indices
+        self.indices_ = []  # Store selected model names
         self.trajectory_ = []  # Losses after each iteration
-        self.weights_ = np.zeros(n_models)  # Model weights in the final ensemble
+        self.weights_ = pd.Series(0, index=base_models_predictions.columns)  # Model weights in the final ensemble
 
-        current_ensemble_predictions = np.zeros(n_samples)  # Initial empty ensemble predictions
+        current_ensemble_predictions = pd.Series(0, index=base_models_predictions.index)  # Initial empty ensemble predictions
 
         for _ in range(self.ensemble_size):
             best_loss = float("inf")
-            best_model_idx = None
+            best_model_name = None
 
             # Iterate through all models to find the one that minimizes the loss when added to the ensemble
-            for idx in range(n_models):
-                model_predictions = base_models_predictions[:, idx]
+            for model_name in base_models_predictions.columns:
+                model_predictions = base_models_predictions[model_name]
                 # Combine current ensemble predictions with this model's predictions
-                combined_predictions = (current_ensemble_predictions + model_predictions) / (len(self.indices_) + 1)
+                combined_predictions = (current_ensemble_predictions * len(self.indices_) + model_predictions) / (len(self.indices_) + 1)
 
                 # Calculate loss for this combined model
                 loss = self._calculate_loss(combined_predictions, true_targets)
@@ -265,56 +274,82 @@ class Meta(BaseEstimator, RegressorMixin):
                 # If this model improves the performance, select it as the best model
                 if loss < best_loss:
                     best_loss = loss
-                    best_model_idx = idx
+                    best_model_name = model_name
 
             # Add the best model's predictions to the ensemble
-            self.indices_.append(best_model_idx)
-            current_ensemble_predictions += base_models_predictions[:, best_model_idx]
+            self.indices_.append(best_model_name)
+            current_ensemble_predictions = (current_ensemble_predictions * (len(self.indices_) - 1) + base_models_predictions[best_model_name]) / len(self.indices_)
             self.trajectory_.append(best_loss)
 
         # Calculate final model weights based on the frequency of their selection
         self._calculate_weights()
+
+        # Store selected model names
+        self.selected_model_names = list(set(self.indices_))
+
+        # Load models from disk
+        self.selected_models = []
+        for model_name in self.selected_model_names:
+            model_path = model_name_to_path[model_name]
+            with open(model_path, 'rb') as f:
+                model = pickle.load(f)
+            self.selected_models.append((model_name, model))
+
+        # Prepare weights in the order of selected_models
+        weights_list = []
+        estimators_list = []
+        for model_name, model in self.selected_models:
+            weight = self.weights_.loc[model_name]
+            weights_list.append(weight)
+            estimators_list.append((model_name, model))
+
+        # Create the ensemble model using VotingRegressor
+        self.ensemble_model = VotingRegressor(estimators=estimators_list, weights=weights_list)
+
+        # Fit the VotingRegressor (estimators are already fitted, so we just need to call fit with any data)
+        self.ensemble_model.fit(base_models_predictions.iloc[:1], true_targets.iloc[:1])  # Dummy fit
+
         return self
 
-    def _calculate_loss(self, predictions: np.ndarray, true_targets: np.ndarray) -> float:
+    def _calculate_loss(self, predictions: pd.Series, true_targets: pd.Series) -> float:
         """Calculate the loss of predictions with respect to the true targets."""
         if self.task_type == 1:  # Classification (accuracy)
-            correct = np.sum(np.argmax(predictions, axis=1) == true_targets)
+            correct = (predictions.round() == true_targets).sum()
             accuracy = correct / len(true_targets)
             return 1 - accuracy  # We want to minimize the loss (1 - accuracy)
         elif self.task_type == 2:  # Regression (mean squared error)
-            return np.mean((predictions - true_targets) ** 2)
+            return ((predictions - true_targets) ** 2).mean()
         else:
             raise ValueError("Unknown task type!")
 
     def _calculate_weights(self) -> None:
         """Calculate the weights of the models based on their frequency of selection in the ensemble."""
         ensemble_members = Counter(self.indices_).most_common()
-        total_counts = sum(count for idx, count in ensemble_members)
-        self.weights_ = np.zeros_like(self.weights_)
-        for idx, count in ensemble_members:
+        total_counts = sum(count for model_name, count in ensemble_members)
+        self.weights_ = pd.Series(0, index=self.weights_.index)
+        for model_name, count in ensemble_members:
             weight = float(count) / total_counts
-            self.weights_[idx] = weight
+            self.weights_.loc[model_name] = weight
 
-    def predict(self, base_models_predictions: np.ndarray) -> np.ndarray:
-        """Create ensemble predictions from the base model predictions using the selected model weights.
+    def predict(self, X: pd.DataFrame) -> pd.Series:
+        """Predict using the ensemble model.
 
         Parameters:
         -----------
-        base_models_predictions : np.ndarray
-            Predictions of the base models, shape: (n_samples, n_models)
+        X : pd.DataFrame
+            Input features.
 
         Returns:
         --------
-        np.ndarray
+        pd.Series
             Final ensemble predictions.
         """
-        average = np.zeros(base_models_predictions.shape[0], dtype=np.float64)
-        for idx, weight in enumerate(self.weights_):
-            if weight > 0.0:
-                average += base_models_predictions[:, idx] * weight
-        return average
+        return pd.Series(self.ensemble_model.predict(X), index=X.index)
 
-    def get_validation_performance(self) -> float:
-        """Return the final validation performance (loss) of the ensemble."""
-        return self.trajectory_[-1]
+    def get_params(self, deep=True):
+        return {'ensemble_size': self.ensemble_size, 'task_type': self.task_type, 'random_state': self.random_state}
+
+    def set_params(self, **params):
+        for param, value in params.items():
+            setattr(self, param, value)
+        return self
