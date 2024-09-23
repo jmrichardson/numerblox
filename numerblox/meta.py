@@ -282,19 +282,13 @@ import os
 
 
 class MetaModel(BaseEstimator, RegressorMixin):
-    def __init__(self, max_ensemble_size: int = 7, random_state: int = 42, cache_dir: str = 'tmp/models',
-                 weight_factor: float = None):
+    def __init__(self, max_ensemble_size: int = 7, random_state: int = 42, weight_factor: float = None):
         self.max_ensemble_size = max_ensemble_size
         self.random_state = random_state
-        self.cache_dir = cache_dir
         self.selected_model_names = []
         self.selected_models = []
         self.ensemble_model = None
         self.weight_factor = weight_factor
-
-        # Ensure cache directory exists at initialization
-        if self.cache_dir and not os.path.exists(self.cache_dir):
-            os.makedirs(self.cache_dir)
 
     def fit(
             self,
@@ -308,7 +302,6 @@ class MetaModel(BaseEstimator, RegressorMixin):
     ) -> 'MetaModel':
         """Fit the ensemble by selecting base models using the provided or default ensemble method."""
 
-        # Check if weight_factor is None and handle sample weights accordingly
         if self.weight_factor is not None:
             sample_weights = get_sample_weights(base_models_predictions, wfactor=self.weight_factor, eras=eras)
         else:
@@ -320,24 +313,6 @@ class MetaModel(BaseEstimator, RegressorMixin):
         valid_idx = true_targets.notnull()
         base_models_predictions = base_models_predictions.loc[valid_idx]
         true_targets = true_targets.loc[valid_idx]
-
-        cache_id = [
-            base_models_predictions.shape,
-            true_targets.shape,
-            tuple(sorted(model_name_to_path.items())),
-            self.max_ensemble_size,
-            self.random_state,
-            self.weight_factor
-        ]
-        cache_hash = get_cache_hash(cache_id)
-        cache_file = os.path.join(self.cache_dir, f"meta_model_{cache_hash}.pkl") if self.cache_dir else None
-
-        if cache_file and os.path.exists(cache_file):
-            with open(cache_file, 'rb') as f:
-                cached_self = pickle.load(f)
-            print(f"Loaded cached meta model from {cache_file}")
-            self.__dict__.update(cached_self.__dict__)
-            return self
 
         ensemble_method.fit(base_models_predictions, true_targets, sample_weights)
 
@@ -361,13 +336,6 @@ class MetaModel(BaseEstimator, RegressorMixin):
         self.ensemble_model = VotingRegressor(estimators=estimators_list, weights=weights_list)
         self.ensemble_model.fit(X, y)
 
-        # Ensure the cache directory exists before saving
-        if cache_file:
-            os.makedirs(self.cache_dir, exist_ok=True)
-            with open(cache_file, 'wb') as f:
-                pickle.dump(self, f)
-            print(f"Saved meta model to cache {cache_file}")
-
         return self
 
     def predict(self, X: pd.DataFrame) -> pd.Series:
@@ -377,7 +345,6 @@ class MetaModel(BaseEstimator, RegressorMixin):
         return {
             'max_ensemble_size': self.max_ensemble_size,
             'random_state': self.random_state,
-            'cache_dir': self.cache_dir,
             'weight_factor': self.weight_factor
         }
 
@@ -385,4 +352,5 @@ class MetaModel(BaseEstimator, RegressorMixin):
         for param, value in params.items():
             setattr(self, param, value)
         return self
+
 
