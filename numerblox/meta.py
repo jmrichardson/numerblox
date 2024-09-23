@@ -18,7 +18,7 @@ import os
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.ensemble import VotingRegressor
 import pickle
-from numerblox.misc import get_cache_hash
+from numerblox.misc import get_cache_hash, get_sample_weights
 from numerblox.ensemble import GreedyEnsemble
 
 
@@ -278,39 +278,46 @@ def make_meta_pipeline(*steps, memory=None, verbose=False) -> MetaPipeline:
     return MetaPipeline(_name_estimators(steps), memory=memory, verbose=verbose)
 
 
+import os
+
+
 class MetaModel(BaseEstimator, RegressorMixin):
-    def __init__(self, ensemble_size: int = 10, random_state: int = None, cache_dir: str = None, weight_factor: float = None):
-        self.ensemble_size = ensemble_size
+    def __init__(self, max_ensemble_size: int = 7, random_state: int = 42, cache_dir: str = 'tmp/models',
+                 weight_factor: float = None):
+        self.max_ensemble_size = max_ensemble_size
         self.random_state = random_state
         self.cache_dir = cache_dir
         self.selected_model_names = []
         self.selected_models = []
         self.ensemble_model = None
-        self.weight_factor = weight_factor  # Added argument for weight factor
+        self.weight_factor = weight_factor
+
+        # Ensure cache directory exists at initialization
+        if self.cache_dir and not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir)
 
     def fit(
             self,
             base_models_predictions: pd.DataFrame,
             true_targets: pd.Series,
+            eras: pd.Series,
             model_name_to_path: dict,
             X: pd.DataFrame,
             y: pd.Series,
-            ensemble_method=GreedyEnsemble  # Default is the GreedyEnsemble class
+            ensemble_method=GreedyEnsemble,
     ) -> 'MetaModel':
         """Fit the ensemble by selecting base models using the provided or default ensemble method."""
 
         # Check if weight_factor is None and handle sample weights accordingly
         if self.weight_factor is not None:
-            sample_weights = get_sample_weights(base_models_predictions, wfactor=self.weight_factor)
+            sample_weights = get_sample_weights(base_models_predictions, wfactor=self.weight_factor, eras=eras)
         else:
-            sample_weights = pd.Series(1, index=base_models_predictions.index)  # Use uniform weights
+            sample_weights = pd.Series(1, index=base_models_predictions.index)
 
-        # If the user passes a class instead of an instance, instantiate it
         if isinstance(ensemble_method, type):
-            ensemble_method = ensemble_method(ensemble_size=self.ensemble_size, random_state=self.random_state)
+            ensemble_method = ensemble_method(max_ensemble_size=self.max_ensemble_size, random_state=self.random_state)
 
-        # Handle None values in true_targets by excluding them
-        valid_idx = true_targets.notnull()  # Find indices where targets are not None
+        valid_idx = true_targets.notnull()
         base_models_predictions = base_models_predictions.loc[valid_idx]
         true_targets = true_targets.loc[valid_idx]
 
@@ -318,9 +325,9 @@ class MetaModel(BaseEstimator, RegressorMixin):
             base_models_predictions.shape,
             true_targets.shape,
             tuple(sorted(model_name_to_path.items())),
-            self.ensemble_size,
+            self.max_ensemble_size,
             self.random_state,
-            self.weight_factor  # Include weight factor in cache id
+            self.weight_factor
         ]
         cache_hash = get_cache_hash(cache_id)
         cache_file = os.path.join(self.cache_dir, f"meta_model_{cache_hash}.pkl") if self.cache_dir else None
@@ -332,14 +339,11 @@ class MetaModel(BaseEstimator, RegressorMixin):
             self.__dict__.update(cached_self.__dict__)
             return self
 
-        # Pass the sample weights to the ensemble method's fit
         ensemble_method.fit(base_models_predictions, true_targets, sample_weights)
 
-        # Get the selected models and weights from the ensemble method
-        self.selected_model_names = list(set(ensemble_method.indices_))
+        self.selected_model_names = ensemble_method.selected_model_names_
         self.weights_ = ensemble_method.weights_
 
-        # Load models from disk
         self.selected_models = []
         for model_name in self.selected_model_names:
             model_path = model_name_to_path[model_name]
@@ -347,7 +351,6 @@ class MetaModel(BaseEstimator, RegressorMixin):
                 model = pickle.load(f)
             self.selected_models.append((model_name, model))
 
-        # Prepare weights and estimators
         weights_list = []
         estimators_list = []
         for model_name, model in self.selected_models:
@@ -355,13 +358,12 @@ class MetaModel(BaseEstimator, RegressorMixin):
             weights_list.append(weight)
             estimators_list.append((model_name, model))
 
-        # Create the ensemble model using VotingRegressor
         self.ensemble_model = VotingRegressor(estimators=estimators_list, weights=weights_list)
-
-        # Dummy fit of the VotingRegressor
         self.ensemble_model.fit(X, y)
 
+        # Ensure the cache directory exists before saving
         if cache_file:
+            os.makedirs(self.cache_dir, exist_ok=True)
             with open(cache_file, 'wb') as f:
                 pickle.dump(self, f)
             print(f"Saved meta model to cache {cache_file}")
@@ -373,13 +375,14 @@ class MetaModel(BaseEstimator, RegressorMixin):
 
     def get_params(self, deep=True):
         return {
-            'ensemble_size': self.ensemble_size,
+            'max_ensemble_size': self.max_ensemble_size,
             'random_state': self.random_state,
             'cache_dir': self.cache_dir,
-            'weight_factor': self.weight_factor  # Added to params
+            'weight_factor': self.weight_factor
         }
 
     def set_params(self, **params):
         for param, value in params.items():
             setattr(self, param, value)
         return self
+

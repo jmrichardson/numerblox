@@ -20,8 +20,8 @@ def _check_sklearn_compatibility(model):
 # Walk-forward training class
 class WalkForward(BaseEstimator, RegressorMixin):
 
-    def __init__(self, model_paths, cache_dir=None, era_column="era", meta=None, meta_eras=[1, 3, 12], model_save_path=None,
-                 metrics_list=None):
+    def __init__(self, model_paths, cache_dir='tmp/model_predictions', era_column="era", meta=None, meta_eras=[1, 3, 12],
+                 era_models_dir='tmp/era_models', final_models_dir='tmp/final_models', metrics_list=None):
         """
         Parameters:
         - model_paths: List of paths to pre-trained sklearn models (.pkl)
@@ -29,7 +29,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
         - era_column: Column name in X that contains the era indicator
         - meta: Meta ensemble instance (can be None)
         - meta_eras: List of integers specifying window sizes for meta models
-        - model_save_path: Path to save the models (default: None)
+        - era_models_dir: Directory to save interim models per era
+        - final_models_dir: Directory to save final models (if None, do not save final models)
         - metrics_list: List of metrics to use for evaluation (default: None)
         """
         print("Initializing WalkForward class")
@@ -44,7 +45,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.eras_trained_on = []
         self.meta = meta  # Ensemble instance passed from outside
         self.meta_eras = meta_eras  # List of window sizes for meta models
-        self.model_save_path = model_save_path  # Path where models will be saved
+        self.era_models_dir = era_models_dir
+        self.final_models_dir = final_models_dir
         self.metrics_list = metrics_list or ["mean_std_sharpe", "apy", "max_drawdown"]
 
         # Dictionaries to keep track of trained models and their paths
@@ -57,10 +59,13 @@ class WalkForward(BaseEstimator, RegressorMixin):
             os.makedirs(self.cache_dir, exist_ok=True)
             print(f"Cache directory set to: {self.cache_dir}")
 
-        # Create model save directory if it doesn't exist and model_save_path is provided
-        if self.model_save_path is not None:
-            os.makedirs(self.model_save_path, exist_ok=True)
-            print(f"Model save directory set to: {self.model_save_path}")
+        # Create era models directory if it doesn't exist
+        os.makedirs(self.era_models_dir, exist_ok=True)
+
+        # Create final models directory if it doesn't exist and final_models_dir is provided
+        if self.final_models_dir is not None:
+            os.makedirs(self.final_models_dir, exist_ok=True)
+            print(f"Final models directory set to: {self.final_models_dir}")
 
         # To store benchmark and evaluation results
         self.evaluation_results = None
@@ -142,8 +147,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 # Cache handling for model predictions
                 cache_id = [train_data.shape, test_era, model_name]
                 cache_hash = get_cache_hash(cache_id)
-                cache_file = os.path.join(self.cache_dir,
-                                          f"{trained_model_name}_{cache_hash}.pkl") if self.cache_dir else None
+                cache_file = os.path.join(self.cache_dir, f"{trained_model_name}_{cache_hash}.pkl") if self.cache_dir else None
 
                 if cache_file and os.path.exists(cache_file):
                     # Load cached predictions if available
@@ -214,6 +218,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
             benchmark_predictions.loc[test_data.index, 'benchmark'] = combined_predictions.iloc[:, 0]
 
             # After base model predictions, create meta models if meta is not None
+            # After base model predictions, create meta models if meta is not None
             if self.meta is not None:
                 for window_size in self.meta_eras:
                     # Check that there are enough past eras to apply the meta-model
@@ -226,6 +231,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
                         recent_oof_preds = pd.concat(recent_oof_preds_list)
                         recent_oof_targets_list = self.oof_targets[-(window_size + 1):-1]  # Exclude current test era
                         recent_oof_targets = pd.concat(recent_oof_targets_list)
+
+                        # Extract corresponding eras for the recent OOF predictions
+                        recent_eras_list = self.eras_trained_on[-(window_size + 1):-1]  # Exclude current test era
+                        recent_eras = pd.Series(np.concatenate(
+                            [[era] * len(pred) for era, pred in zip(recent_eras_list, recent_oof_preds_list)]))
 
                         # Check if there are any valid targets (i.e., not None)
                         if recent_oof_targets.notnull().any():
@@ -243,7 +253,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
                             # Create Meta model (clone the meta instance to avoid state carry-over)
                             meta_model = clone(self.meta)
-                            meta_model.fit(base_models_predictions, true_targets, model_name_to_path, train_data,
+                            # Pass the eras to the meta model fit method
+                            meta_model.fit(base_models_predictions, true_targets, recent_eras, model_name_to_path, train_data,
                                            train_targets)
 
                             # Use consistent meta model name
