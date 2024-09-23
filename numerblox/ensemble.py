@@ -2,12 +2,11 @@ import scipy
 import warnings
 import numpy as np
 import pandas as pd
-from collections import Counter
-from typing import List, Tuple
 from typing import Union, List
 import sklearn
 from sklearn.base import BaseEstimator, TransformerMixin
-        
+from collections import Counter
+
 
 class NumeraiEnsemble(BaseEstimator, TransformerMixin):
     """
@@ -37,8 +36,8 @@ class NumeraiEnsemble(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X: Union[np.array, pd.DataFrame], era_series: pd.Series) -> np.array:
-        """ 
-        Standardize by era and ensemble. 
+        """
+        Standardize by era and ensemble.
         :param X: Input data where each column contains predictions from an estimator.
         :param era_series: Era labels (strings) for each row in X.
         :return: Ensembled predictions.
@@ -48,17 +47,17 @@ class NumeraiEnsemble(BaseEstimator, TransformerMixin):
 
         if len(X.shape) == 1:
             raise ValueError("NumeraiEnsemble requires at least 2 prediction columns. Got 1.")
-        
+
         n_models = X.shape[1]
         if n_models <= 1:
             raise ValueError(f"NumeraiEnsemble requires at least 2 predictions columns. Got {len(n_models)}.")
-        
+
         # Override weights if donate_weighted is True
         if self.donate_weighted:
             weights = self._get_donate_weights(n=n_models)
         else:
             weights = self.weights
-            
+
         if isinstance(X, pd.DataFrame):
             X = X.values
         # Standardize predictions by era
@@ -81,26 +80,26 @@ class NumeraiEnsemble(BaseEstimator, TransformerMixin):
         # Average out predictions
         ensembled_predictions = np.average(standardized_pred_arr, axis=1, weights=weights)
         return ensembled_predictions.reshape(-1, 1)
-    
+
     def fit_transform(self, X: Union[np.array, pd.DataFrame], y=None, era_series: pd.Series = None) -> np.array:
         self.fit(X, y)
         return self.transform(X, era_series)
-    
+
     def predict(self, X: Union[np.array, pd.DataFrame], era_series: pd.Series) -> np.array:
-        """ 
+        """
         For if a NumeraiEnsemble happens to be the last step in the pipeline. Has same behavior as transform.
         """
         return self.transform(X, era_series=era_series)
 
     def _standardize(self, X: np.array) -> np.array:
-        """ 
+        """
         Standardize single era.
         :param X: Predictions for a single era.
         :return: Standardized predictions.
         """
         percentile_X = (scipy.stats.rankdata(X, method="ordinal") - 0.5) / len(X)
         return percentile_X
-    
+
     def _standardize_by_era(self, X: np.array, era_series: Union[np.array, pd.Series, pd.DataFrame]) -> np.array:
         """
         Standardize predictions of a single estimator by era.
@@ -113,7 +112,7 @@ class NumeraiEnsemble(BaseEstimator, TransformerMixin):
         df = pd.DataFrame({'prediction': X, 'era': era_series})
         df['standardized_prediction'] = df.groupby('era')['prediction'].transform(self._standardize)
         return df['standardized_prediction'].values.flatten()
-    
+
     def _get_donate_weights(self, n: int) -> list:
         """
         Exponential weights as per Donate et al.'s formula.
@@ -134,10 +133,10 @@ class NumeraiEnsemble(BaseEstimator, TransformerMixin):
 
 
 class PredictionReducer(BaseEstimator, TransformerMixin):
-    """ 
-    Reduce multiclassification and proba preds to 1 column per model. 
+    """
+    Reduce multiclassification and proba preds to 1 column per model.
     If predictions were generated with a regressor or regular predict you don't need this step.
-    :param n_models: Number of resulting columns. 
+    :param n_models: Number of resulting columns.
     This indicates how many models were trained to generate the prediction array.
     :param n_classes: Number of classes for each prediction.
     If predictions were generated with predict_proba and binary classification -> n_classes = 2.
@@ -173,90 +172,36 @@ class PredictionReducer(BaseEstimator, TransformerMixin):
             reduced.append(r)
         reduced_arr = np.column_stack(reduced)
         return reduced_arr
-    
+
     def predict(self, X: np.array):
-        """ 
+        """
         For if PredictionReducer happens to be the last step in the pipeline. Has same behavior as transform.
         :param X: Input predictions.
         :return: Reduced predictions of shape (X.shape[0], self.n_models).
         """
         return self.transform(X)
-    
+
     def get_feature_names_out(self, input_features=None) -> List[str]:
         return [f"reduced_prediction_{i}" for i in range(self.n_models)] if not input_features else input_features
 
 
-from collections import Counter
-import numpy as np
-import pandas as pd
-from sklearn.base import BaseEstimator, RegressorMixin
-from sklearn.ensemble import VotingRegressor
-import pickle
-
-class Meta(BaseEstimator, RegressorMixin):
-    def __init__(
-            self,
-            task_type: int,
-            ensemble_size: int = 50,
-            random_state: int = None,
-    ):
-        """Meta Ensemble
-
-        Parameters:
-        -----------
-        task_type : int
-            The task type, typically 1 for classification, 2 for regression.
-
-        ensemble_size : int
-            Number of models to include in the ensemble.
-
-        random_state : int
-            Seed for reproducibility.
-        """
+class GreedyEnsemble:
+    def __init__(self, ensemble_size: int, random_state: int = None):
         self.ensemble_size = ensemble_size
-        self.task_type = task_type
         self.random_state = random_state
         self.indices_ = []
+        self.trajectory_ = []
         self.weights_ = None
-        self.selected_model_names = []
-        self.selected_models = []
-        self.ensemble_model = None  # This will be the VotingRegressor
 
-    def fit(
-            self,
-            base_models_predictions: pd.DataFrame,
-            true_targets: pd.Series,
-            model_name_to_path: dict,
-    ) -> 'Meta':
-        """Fit the ensemble by selecting base models based on their performance.
+    def fit(self, base_models_predictions: pd.DataFrame, true_targets: pd.Series, sample_weights: pd.Series) -> None:
+        """Fit the greedy ensemble by selecting models based on their performance."""
+        n_samples, n_models = base_models_predictions.shape
 
-        Parameters:
-        -----------
-        base_models_predictions : pd.DataFrame
-            Predictions of the base models, shape: (n_samples, n_models)
-
-        true_targets : pd.Series
-            True labels/targets for the task, shape: (n_samples,)
-
-        model_name_to_path : dict
-            Mapping from model names to model file paths
-
-        Returns:
-        --------
-        self
-        """
-        # Check that the ensemble size is valid
         if self.ensemble_size < 1:
             raise ValueError("Ensemble size cannot be less than one!")
 
-        n_samples, n_models = base_models_predictions.shape
-
-        # Initialize ensemble predictions and other attributes
-        self.indices_ = []  # Store selected model names
-        self.trajectory_ = []  # Losses after each iteration
-        self.weights_ = pd.Series(0, index=base_models_predictions.columns)  # Model weights in the final ensemble
-
-        current_ensemble_predictions = pd.Series(0, index=base_models_predictions.index)  # Initial empty ensemble predictions
+        # Initialize ensemble predictions
+        current_ensemble_predictions = pd.Series(0, index=base_models_predictions.index)
 
         for _ in range(self.ensemble_size):
             best_loss = float("inf")
@@ -268,8 +213,8 @@ class Meta(BaseEstimator, RegressorMixin):
                 # Combine current ensemble predictions with this model's predictions
                 combined_predictions = (current_ensemble_predictions * len(self.indices_) + model_predictions) / (len(self.indices_) + 1)
 
-                # Calculate loss for this combined model
-                loss = self._calculate_loss(combined_predictions, true_targets)
+                # Calculate loss for this combined model, weighted by sample weights
+                loss = self._calculate_loss(combined_predictions, true_targets, sample_weights)
 
                 # If this model improves the performance, select it as the best model
                 if loss < best_loss:
@@ -282,74 +227,17 @@ class Meta(BaseEstimator, RegressorMixin):
             self.trajectory_.append(best_loss)
 
         # Calculate final model weights based on the frequency of their selection
-        self._calculate_weights()
+        self._calculate_weights(base_models_predictions)
 
-        # Store selected model names
-        self.selected_model_names = list(set(self.indices_))
+    def _calculate_loss(self, predictions: pd.Series, true_targets: pd.Series, sample_weights: pd.Series) -> float:
+        """Calculate the weighted loss of predictions with respect to the true targets."""
+        return (((predictions - true_targets) ** 2) * sample_weights).mean()  # Weighted MSE
 
-        # Load models from disk
-        self.selected_models = []
-        for model_name in self.selected_model_names:
-            model_path = model_name_to_path[model_name]
-            with open(model_path, 'rb') as f:
-                model = pickle.load(f)
-            self.selected_models.append((model_name, model))
-
-        # Prepare weights in the order of selected_models
-        weights_list = []
-        estimators_list = []
-        for model_name, model in self.selected_models:
-            weight = self.weights_.loc[model_name]
-            weights_list.append(weight)
-            estimators_list.append((model_name, model))
-
-        # Create the ensemble model using VotingRegressor
-        self.ensemble_model = VotingRegressor(estimators=estimators_list, weights=weights_list)
-
-        # Fit the VotingRegressor (estimators are already fitted, so we just need to call fit with any data)
-        self.ensemble_model.fit(base_models_predictions.iloc[:1], true_targets.iloc[:1])  # Dummy fit
-
-        return self
-
-    def _calculate_loss(self, predictions: pd.Series, true_targets: pd.Series) -> float:
-        """Calculate the loss of predictions with respect to the true targets."""
-        if self.task_type == 1:  # Classification (accuracy)
-            correct = (predictions.round() == true_targets).sum()
-            accuracy = correct / len(true_targets)
-            return 1 - accuracy  # We want to minimize the loss (1 - accuracy)
-        elif self.task_type == 2:  # Regression (mean squared error)
-            return ((predictions - true_targets) ** 2).mean()
-        else:
-            raise ValueError("Unknown task type!")
-
-    def _calculate_weights(self) -> None:
+    def _calculate_weights(self, base_models_predictions: pd.DataFrame) -> None:
         """Calculate the weights of the models based on their frequency of selection in the ensemble."""
         ensemble_members = Counter(self.indices_).most_common()
         total_counts = sum(count for model_name, count in ensemble_members)
-        self.weights_ = pd.Series(0, index=self.weights_.index)
+        self.weights_ = pd.Series(0, index=base_models_predictions.columns)
         for model_name, count in ensemble_members:
             weight = float(count) / total_counts
             self.weights_.loc[model_name] = weight
-
-    def predict(self, X: pd.DataFrame) -> pd.Series:
-        """Predict using the ensemble model.
-
-        Parameters:
-        -----------
-        X : pd.DataFrame
-            Input features.
-
-        Returns:
-        --------
-        pd.Series
-            Final ensemble predictions.
-        """
-        return pd.Series(self.ensemble_model.predict(X), index=X.index)
-
-    def get_params(self, deep=True):
-        return {'ensemble_size': self.ensemble_size, 'task_type': self.task_type, 'random_state': self.random_state}
-
-    def set_params(self, **params):
-        for param, value in params.items():
-            setattr(self, param, value)
-        return self

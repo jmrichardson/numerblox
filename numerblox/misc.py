@@ -1,4 +1,6 @@
 import json
+import pickle
+import hashlib
 
 class AttrDict(dict):
     """ Access dictionary elements as attributes. """
@@ -30,3 +32,19 @@ def load_key_from_json(file_path: str, *args, **kwargs):
     pub_id = json_data["pub_id"]
     secret_key = json_data["secret_key"]
     return Key(pub_id=pub_id, secret_key=secret_key)
+
+
+def get_cache_hash(*args, **kwds):
+    sorted_kwargs = str(sorted(kwds.items()))
+    serialized = pickle.dumps((args, sorted_kwargs))
+    hash_bytes = hashlib.sha256(serialized).digest()
+    hash_hex = hashlib.sha256(hash_bytes).hexdigest()
+    return hash_hex[:12]
+
+
+def get_sample_weights(data, wfactor=.2):
+    num_weights = len(data)
+    weights = np.exp(-np.arange(num_weights) / (wfactor * num_weights))[::-1]
+    normalized_weights = weights * (num_weights / weights.sum())
+    data['sample_weight'] = normalized_weights
+    return data['sample_weight']
