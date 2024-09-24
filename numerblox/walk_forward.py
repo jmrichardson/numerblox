@@ -20,13 +20,12 @@ def _check_sklearn_compatibility(model):
 # Walk-forward training class
 class WalkForward(BaseEstimator, RegressorMixin):
 
-    def __init__(self, model_paths, horizon_eras=4, predictions_dir='tmp/model_predictions', era_column="era", meta=None, meta_eras=[1, 3, 12],
+    def __init__(self, model_paths, horizon_eras=4, era_column="era", meta=None, meta_eras=[1, 3, 12],
                  era_models_dir='tmp/era_models', final_models_dir='tmp/final_models'):
         """
         Parameters:
         - model_paths: List of paths to pre-trained sklearn models (.pkl)
         - horizon_eras:  Number of eras of prediction time frame
-        - predictions_dir: Directory to save predictions results (if None, no caching will be done)
         - era_column: Column name in X that contains the era indicator
         - meta: Meta ensemble instance (can be None)
         - meta_eras: List of integers specifying window sizes for meta models
@@ -39,7 +38,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.models = [self._load_model(path) for path in model_paths]  # Load models from disk with validation
         self.model_names = [os.path.basename(path).replace('.pkl', '') for path in model_paths]  # Extract model names
         self.horizon_eras = horizon_eras
-        self.predictions_dir = predictions_dir
         self.era_column = era_column
         self.oof_predictions = []
         self.oof_targets = []
@@ -54,11 +52,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.latest_trained_model_paths = {}  # To keep track of the latest trained model path per model name
         self.latest_trained_models = {}  # To keep track of the latest trained models per model name
 
-        # Create cache directory if caching is enabled and directory doesn't exist
-        if self.predictions_dir is not None:
-            os.makedirs(self.predictions_dir, exist_ok=True)
-            print(f"Cache directory set to: {self.predictions_dir}")
-
         # Create era models directory if it doesn't exist
         os.makedirs(self.era_models_dir, exist_ok=True)
 
@@ -71,6 +64,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.evaluation_results = None
         self.benchmark_predictions = None
         self.per_era_numerai_corr = None  # To store per-era Numerai correlations
+
+        self.meta_weights = {}
 
     def _load_model(self, path):
         """Load a model from the given path and check its compatibility with sklearn."""
@@ -96,15 +91,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
         return model_path
 
     def fit(self, X_train, y_train, X_test, y_test):
-        """
-        Fits the models on provided training data and generates out-of-sample (OOF) predictions.
-
-        Parameters:
-        - X_train: DataFrame containing training feature columns and an 'era' column.
-        - y_train: Series containing the training target values.
-        - X_test: DataFrame containing testing feature columns and an 'era' column.
-        - y_test: Series containing the test target values.
-        """
         print("Starting training and walk-forward prediction")
 
         # Extract unique eras from test data
@@ -147,6 +133,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
             for model, model_name in zip(self.models, self.model_names):
                 task_count += 1
 
+                # Construct cache ID for identifying model save/load files
                 cache_id = [
                     train_data.shape,  # Shape of the training data
                     sorted(train_data.columns.tolist()),  # Column names of the training data
@@ -160,45 +147,31 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 trained_model_name = f"{model_name}_{test_era}_{cache_hash}"
                 print(f"Processing model: {trained_model_name} on test era: {test_era} ({task_count}/{total_tasks})")
 
-                cache_file = os.path.join(self.predictions_dir,
-                                          f"{trained_model_name}.pkl") if self.predictions_dir else None
-                if cache_file and os.path.exists(cache_file):
-                    with open(cache_file, 'rb') as f:
-                        test_predictions = pickle.load(f)
-                    test_predictions.name = model_name
-                    print(
-                        f"Loaded cached predictions for era {test_era} and model {trained_model_name} from {cache_file}")
+                model_path = os.path.join(self.era_models_dir, f"{trained_model_name}.pkl")
 
-                    if trained_model_name not in self.trained_model_paths:
-                        model_path = os.path.join(self.era_models_dir, f"{trained_model_name}.pkl")
-                        if os.path.exists(model_path):
-                            self.trained_model_paths[trained_model_name] = model_path
-                            self.latest_trained_model_paths[model_name] = model_path
-                            if model_name not in self.latest_trained_models:
-                                with open(model_path, 'rb') as f:
-                                    loaded_model = pickle.load(f)
-                                self.latest_trained_models[model_name] = loaded_model
-                        else:
-                            print(f"Model file {model_path} not found. Retraining model.")
-                            model.fit(train_data, train_targets)
-                            model_path = self._save_model(model, trained_model_name)
-                            self.trained_model_paths[trained_model_name] = model_path
-                            self.latest_trained_model_paths[model_name] = model_path
-                            self.latest_trained_models[model_name] = model
+                if os.path.exists(model_path):
+                    # Load the trained model from disk if it exists
+                    with open(model_path, 'rb') as f:
+                        model = pickle.load(f)
+                    print(f"Loaded trained model from {model_path}")
+
+                    # Make sure the latest trained model path is updated even when loading from cache
+                    self.latest_trained_model_paths[model_name] = model_path
+                    self.latest_trained_models[model_name] = model
                 else:
+                    # Train the model if it hasn't been trained for this era yet
                     print(f"Training model: {model_name} on training data up to era {test_era}")
-                    model.fit(train_data.drop(columns=['era']), train_targets)
-                    model_path = self._save_model(model, trained_model_name)
+                    model.fit(train_data.drop(columns=[self.era_column]), train_targets)
+
+                    # Save the trained model to the cache directory
+                    self._save_model(model, trained_model_name)
                     self.trained_model_paths[trained_model_name] = model_path
                     self.latest_trained_model_paths[model_name] = model_path
                     self.latest_trained_models[model_name] = model
-                    test_predictions = pd.Series(model.predict(test_data.drop(columns=['era'])),
-                                                 index=test_data.index, name=model_name)
-                    if cache_file:
-                        with open(cache_file, 'wb') as f:
-                            pickle.dump(test_predictions, f)
-                        print(
-                            f"Saved predictions for era {test_era} and model {trained_model_name} to cache {cache_file}")
+
+                # Make predictions for the current test era
+                test_predictions = pd.Series(model.predict(test_data.drop(columns=[self.era_column])),
+                                             index=test_data.index, name=model_name)
 
                 combined_predictions[model_name] = test_predictions
 
@@ -207,10 +180,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
             self.oof_targets.append(test_targets)
             self.eras_trained_on.append(test_era)
 
+            # Now handle meta models, ensuring they predict each era once enough data (window) is available
             if self.meta is not None:
-                for window_size in self.meta_eras:  # Use window_size directly without subtracting 1
+                for window_size in self.meta_eras:
                     # Ensure there are enough OOF predictions to form the meta model
-                    if len(self.oof_predictions) > (window_size + self.horizon_eras):
+                    if len(self.oof_predictions) >= (window_size + self.horizon_eras):
                         print(
                             f"Creating meta model with window size: {window_size} and horizon eras: {self.horizon_eras}")
 
@@ -229,14 +203,18 @@ class WalkForward(BaseEstimator, RegressorMixin):
                             [[era] * len(pred) for era, pred in zip(recent_eras_list, recent_oof_preds_list)]
                         ))
 
+                        # Exclude meta model predictions from base models
+                        base_model_columns = [col for col in recent_oof_preds.columns if
+                                              not col.startswith('meta_model')]
+                        base_models_predictions = recent_oof_preds[base_model_columns]
+
                         # Proceed with fitting the meta model if targets are available
                         if recent_oof_targets.notnull().any():
-                            base_models_predictions = recent_oof_preds
                             true_targets = recent_oof_targets
 
                             # Collect paths of base models
                             model_name_to_path = {}
-                            for col in base_models_predictions.columns:
+                            for col in base_model_columns:
                                 model_path = self.latest_trained_model_paths.get(col)
                                 if not model_path:
                                     raise ValueError(f"No trained model path found for base model {col}")
@@ -250,38 +228,34 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
                             if os.path.exists(model_path):
                                 print(f"Meta model cache found at {model_path}, loading model.")
+                                # Load the entire meta model from the cache
                                 with open(model_path, 'rb') as f:
-                                    meta_model.ensemble_model = pickle.load(f)
+                                    meta_model = pickle.load(f)
                             else:
                                 # Fit the meta model only if no cache is found
                                 meta_model.fit(base_models_predictions, true_targets, recent_eras, model_name_to_path,
-                                               train_data.drop(columns=['era']), train_targets)
-                                model_path = self._save_model(meta_model.ensemble_model, trained_meta_model_name)
+                                               train_data.drop(columns=[self.era_column]), train_targets)
+
+                                # Save the entire meta model object
+                                with open(model_path, 'wb') as f:
+                                    pickle.dump(meta_model, f)
                                 print(f"Saved meta model: {trained_meta_model_name} to {model_path}")
 
-                            self.trained_model_paths[trained_meta_model_name] = model_path
-                            self.latest_trained_model_paths[meta_model_name] = model_path
-                            self.latest_trained_models[meta_model_name] = meta_model.ensemble_model
+                            # Store the weights of the meta model (already part of the meta_model object)
+                            self.meta_weights[trained_meta_model_name] = meta_model.weights_
 
-                            # Make predictions using the meta model
-                            meta_predictions = meta_model.predict(test_data.drop(columns=['era']))
+                            # Make predictions using the meta model for the current test era
+                            meta_predictions = meta_model.predict(test_data.drop(columns=[self.era_column]))
+
+                            # Store meta predictions in the combined predictions for each era
                             combined_predictions[meta_model_name] = meta_predictions
-
-                            if meta_model_name not in self.model_names:
-                                self.models.append(meta_model.ensemble_model)
-                                self.model_names.append(meta_model_name)
 
             # Update train data by concatenating test data after each iteration
             train_data = pd.concat([train_data, test_data])
             train_targets = pd.concat([train_targets, test_targets])
 
-        # Save final models if final_models_dir is set
-        if self.final_models_dir is not None:
-            print("Saving final versions of all models...")
-            for model_name, model in zip(self.model_names, self.models):
-                trained_model_name = f"{model_name}"
-                self._save_model(model, trained_model_name, is_final=True)
-
+        # After the loop, all meta predictions will be present in the combined_predictions DataFrame
+        # Collect all OOF predictions
         for idx, era in enumerate(self.eras_trained_on):
             self.oof_predictions[idx]['era'] = era
         self.all_oof_predictions = pd.concat(self.oof_predictions)
@@ -291,6 +265,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.evaluate(X_test, y_test)
 
         return self
+
+
 
     def evaluate(self, X, y):
         print("Starting evaluation...")
