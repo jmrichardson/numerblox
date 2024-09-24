@@ -111,7 +111,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
         eras_test = sorted(X_test[self.era_column].unique())
 
         # Initialize train_data and train_targets
-        train_data = X_train.drop(columns=[self.era_column])  # Initial training data
+        train_data = X_train  # Initial training data
         train_targets = y_train
 
         # Benchmark DataFrame to collect predictions (only for base models, not meta models)
@@ -136,7 +136,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
         for test_era in tqdm(eras_test, desc="Walk-forward training"):
             print(f"Processing test era: {test_era}")
 
-            test_data = X_test[X_test[self.era_column] == test_era].drop(columns=[self.era_column])
+            test_data = X_test[X_test[self.era_column] == test_era]
             test_targets = y_test.loc[test_data.index]
 
             if train_data.empty or test_data.empty:
@@ -187,12 +187,12 @@ class WalkForward(BaseEstimator, RegressorMixin):
                             self.latest_trained_models[model_name] = model
                 else:
                     print(f"Training model: {model_name} on training data up to era {test_era}")
-                    model.fit(train_data, train_targets)
+                    model.fit(train_data.drop(columns=['era']), train_targets)
                     model_path = self._save_model(model, trained_model_name)
                     self.trained_model_paths[trained_model_name] = model_path
                     self.latest_trained_model_paths[model_name] = model_path
                     self.latest_trained_models[model_name] = model
-                    test_predictions = pd.Series(model.predict(test_data),
+                    test_predictions = pd.Series(model.predict(test_data.drop(columns=['era'])),
                                                  index=test_data.index, name=model_name)
                     if cache_file:
                         with open(cache_file, 'wb') as f:

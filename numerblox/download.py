@@ -662,7 +662,7 @@ class SyntheticNumeraiData:
                  n_train_eras: int = 15,
                  n_test_eras: int = 5,
                  split_target: bool = True,
-                 random_state: int = None):
+                 random_state: int = 42):
         self.n_rows_per_era = n_rows_per_era
         self.n_features = n_features
         self.alpha = alpha
@@ -699,28 +699,22 @@ class SyntheticNumeraiData:
         if self.random_state is not None:
             np.random.seed(self.random_state)
 
-        # Column names
-        columns = ['era'] + [f'feature_x{i}' for i in range(self.n_features)] + ['target']
+        # Generate all eras in one go
+        eras = np.repeat(np.arange(1, self.n_train_eras + self.n_test_eras + 1), self.n_rows_per_era)
 
-        # Target bins for correct binning
+        # Generate all targets in one go
         target_bins = [0.0, 0.25, 0.5, 0.75, 1.0]
+        targets = np.random.choice(target_bins, size=len(eras))
 
-        # Generating data with features based on the target and adding noise
-        data = []
-        for era in range(1, self.n_train_eras + self.n_test_eras + 1):
-            for _ in range(self.n_rows_per_era):
-                # Randomly assign target from target_bins
-                target = np.random.choice(target_bins)
-                # Generate features: signal from the target and noise
-                features = [
-                    np.clip(int(self.alpha * target * 4 + (1 - self.alpha) * np.random.randint(0, 5)), 0, 4)
-                    for _ in range(self.n_features)
-                ]
-                # Append era, features, and target to the data
-                data.append([era] + features + [target])
+        # Generate all features in a vectorized way: signal from the target and noise
+        noise = np.random.randint(0, 5, size=(len(eras), self.n_features))
+        signals = (self.alpha * targets[:, None] * 4).astype(int)
+        features = np.clip(signals + (1 - self.alpha) * noise, 0, 4).astype(int)
 
-        # Convert to DataFrame
-        data = pd.DataFrame(data, columns=columns)
+        # Create DataFrame using vectorized data
+        data = pd.DataFrame(features, columns=[f'feature_x{i}' for i in range(self.n_features)])
+        data['era'] = eras
+        data['target'] = targets
 
         # Split data based on eras for train and test sets
         train_data = data[data['era'] <= self.n_train_eras]
