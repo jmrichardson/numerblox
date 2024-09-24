@@ -73,10 +73,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.meta_weights = {}
 
     def fit(self, X_train, y_train, X_test, y_test):
-        print("Starting training and walk-forward prediction")
 
-        if self.train_weights is not None and self.expand_train:
-            raise ValueError("expand_train must be False when using train_weights.")
+        # Validate arguments before proceeding
+        self.validate_arguments(X_train, y_train, X_test, y_test)
+
+        print("Starting training and walk-forward prediction")
 
         # Extract unique eras from test data
         eras_test = sorted(X_test[self.era_column].unique())
@@ -433,6 +434,72 @@ class WalkForward(BaseEstimator, RegressorMixin):
             pickle.dump(model, f)
         print(f"Saved model: {model_name} to {model_path}")
         return model_path
+
+
+    def validate_arguments(self, X_train, y_train, X_test, y_test):
+        """
+        Validate user-provided arguments and raise errors or warnings if any inconsistencies are found.
+        """
+        print("Validating arguments...")
+
+        # Check if X_train, X_test are DataFrames
+        if not isinstance(X_train, pd.DataFrame):
+            raise TypeError(f"X_train must be a pandas DataFrame, got {type(X_train)} instead.")
+        if not isinstance(X_test, pd.DataFrame):
+            raise TypeError(f"X_test must be a pandas DataFrame, got {type(X_test)} instead.")
+
+        # Check if y_train, y_test are Series
+        if not isinstance(y_train, pd.Series):
+            raise TypeError(f"y_train must be a pandas Series, got {type(y_train)} instead.")
+        if not isinstance(y_test, pd.Series):
+            raise TypeError(f"y_test must be a pandas Series, got {type(y_test)} instead.")
+
+        # Check if era_column exists in X_train and X_test
+        if self.era_column not in X_train.columns:
+            raise ValueError(f"era_column '{self.era_column}' not found in X_train columns.")
+        if self.era_column not in X_test.columns:
+            raise ValueError(f"era_column '{self.era_column}' not found in X_test columns.")
+
+        # Check if model paths are provided and models are loaded correctly
+        if not self.model_paths or len(self.models) == 0:
+            raise ValueError("No model paths provided or models failed to load. Please check model paths.")
+
+        # Check if train_weights are valid
+        if self.train_weights is not None:
+            # Check if train_weights is either a numpy array or pandas series
+            if not isinstance(self.train_weights, (np.ndarray, pd.Series)):
+                raise TypeError(
+                    f"train_weights must be a numpy array or pandas Series, got {type(self.train_weights)} instead.")
+
+            # Convert train_weights to numpy if it's a pandas series
+            if isinstance(self.train_weights, pd.Series):
+                self.train_weights = self.train_weights.to_numpy()
+
+            # Check if the length of train_weights matches the length of X_train
+            if len(self.train_weights) != len(X_train):
+                raise ValueError(
+                    f"Length of train_weights ({len(self.train_weights)}) must match length of X_train ({len(X_train)}).")
+
+            # Ensure expand_train is False if train_weights are used
+            if self.expand_train:
+                raise ValueError("train_weights can only be used when expand_train is False.")
+
+        # Check if horizon_eras is a positive integer
+        if not isinstance(self.horizon_eras, int) or self.horizon_eras <= 0:
+            raise ValueError(f"horizon_eras must be a positive integer, got {self.horizon_eras}.")
+
+        # Ensure meta model is provided if meta ensemble is required
+        if self.meta is not None and not hasattr(self.meta, 'fit'):
+            raise ValueError("Meta model provided must have a 'fit' method for ensemble training.")
+
+        # Additional checks for directories
+        if self.era_models_dir is None or not isinstance(self.era_models_dir, str):
+            raise ValueError(f"Invalid era_models_dir. It must be a non-empty string, got {self.era_models_dir}.")
+
+        if self.final_models_dir is not None and not isinstance(self.final_models_dir, str):
+            raise ValueError(f"Invalid final_models_dir. It must be a string or None, got {self.final_models_dir}.")
+
+        print("Arguments validation completed successfully.")
 
 
 
