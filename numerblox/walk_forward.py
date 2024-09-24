@@ -20,11 +20,12 @@ def _check_sklearn_compatibility(model):
 # Walk-forward training class
 class WalkForward(BaseEstimator, RegressorMixin):
 
-    def __init__(self, model_paths, predictions_dir='tmp/model_predictions', era_column="era", meta=None, meta_eras=[1, 3, 12],
+    def __init__(self, model_paths, horizon_eras=4, predictions_dir='tmp/model_predictions', era_column="era", meta=None, meta_eras=[1, 3, 12],
                  era_models_dir='tmp/era_models', final_models_dir='tmp/final_models'):
         """
         Parameters:
         - model_paths: List of paths to pre-trained sklearn models (.pkl)
+        - horizon_eras:  Number of eras of prediction time frame
         - predictions_dir: Directory to save predictions results (if None, no caching will be done)
         - era_column: Column name in X that contains the era indicator
         - meta: Meta ensemble instance (can be None)
@@ -37,6 +38,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.model_paths = model_paths
         self.models = [self._load_model(path) for path in model_paths]  # Load models from disk with validation
         self.model_names = [os.path.basename(path).replace('.pkl', '') for path in model_paths]  # Extract model names
+        self.horizon_eras = horizon_eras
         self.predictions_dir = predictions_dir
         self.era_column = era_column
         self.oof_predictions = []
@@ -132,7 +134,14 @@ class WalkForward(BaseEstimator, RegressorMixin):
             for model, model_name in zip(self.models, self.model_names):
                 task_count += 1
 
-                cache_id = [train_data.shape, test_era, model_name]
+                cache_id = [
+                    train_data.shape,  # Shape of the training data
+                    sorted(train_data.columns.tolist()),  # Column names of the training data
+                    train_targets.name,  # Name of the target variable
+                    test_era,  # Current test era
+                    model_name,  # Model name
+                    self.horizon_eras,  # The horizon eras
+                ]
                 cache_hash = get_cache_hash(cache_id)
 
                 trained_model_name = f"{model_name}_{test_era}_{cache_hash}"
@@ -188,23 +197,33 @@ class WalkForward(BaseEstimator, RegressorMixin):
             benchmark_predictions.loc[test_data.index, 'benchmark'] = combined_predictions.iloc[:, 0]
 
             if self.meta is not None:
-                for window_size in self.meta_eras:
-                    if len(self.oof_predictions) > window_size:
-                        print(f"Creating meta model with window size: {window_size}")
+                for window_size in self.meta_eras:  # Use window_size directly without subtracting 1
+                    # Ensure there are enough OOF predictions to form the meta model
+                    if len(self.oof_predictions) > (window_size + self.horizon_eras):
+                        print(
+                            f"Creating meta model with window size: {window_size} and horizon eras: {self.horizon_eras}")
 
-                        recent_oof_preds_list = self.oof_predictions[-(window_size + 1):-1]
+                        # Get the eras up to (but not including) the last 'horizon_eras'
+                        recent_oof_preds_list = self.oof_predictions[
+                                                -(window_size + self.horizon_eras):-self.horizon_eras]
                         recent_oof_preds = pd.concat(recent_oof_preds_list)
-                        recent_oof_targets_list = self.oof_targets[-(window_size + 1):-1]
+
+                        # Get corresponding targets and eras for the same time window
+                        recent_oof_targets_list = self.oof_targets[
+                                                  -(window_size + self.horizon_eras):-self.horizon_eras]
                         recent_oof_targets = pd.concat(recent_oof_targets_list)
 
-                        recent_eras_list = self.eras_trained_on[-(window_size + 1):-1]
+                        recent_eras_list = self.eras_trained_on[-(window_size + self.horizon_eras):-self.horizon_eras]
                         recent_eras = pd.Series(np.concatenate(
-                            [[era] * len(pred) for era, pred in zip(recent_eras_list, recent_oof_preds_list)]))
+                            [[era] * len(pred) for era, pred in zip(recent_eras_list, recent_oof_preds_list)]
+                        ))
 
+                        # Proceed with fitting the meta model if targets are available
                         if recent_oof_targets.notnull().any():
                             base_models_predictions = recent_oof_preds
                             true_targets = recent_oof_targets
 
+                            # Collect paths of base models
                             model_name_to_path = {}
                             for col in base_models_predictions.columns:
                                 model_path = self.latest_trained_model_paths.get(col)
@@ -233,17 +252,17 @@ class WalkForward(BaseEstimator, RegressorMixin):
                             self.latest_trained_model_paths[meta_model_name] = model_path
                             self.latest_trained_models[meta_model_name] = meta_model.ensemble_model
 
+                            # Make predictions using the meta model
                             meta_predictions = meta_model.predict(test_data)
                             combined_predictions[meta_model_name] = meta_predictions
 
                             if meta_model_name not in self.model_names:
                                 self.models.append(meta_model.ensemble_model)
                                 self.model_names.append(meta_model_name)
-                        else:
-                            print(f"Skip: window size {window_size} in era {test_era} as all true_targets are None.")
 
-                train_data = pd.concat([train_data, test_data])
-                train_targets = pd.concat([train_targets, test_targets])
+                    # Update train data by concatenating test data after each iteration
+                    train_data = pd.concat([train_data, test_data])
+                    train_targets = pd.concat([train_targets, test_targets])
 
         # Save final models if final_models_dir is set
         if self.final_models_dir is not None:
@@ -263,17 +282,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
         return self
 
     def evaluate(self, X, y):
-        """
-        Evaluates the model predictions on the given data for each model individually.
-
-        Parameters:
-        - X: DataFrame containing the features and 'era' column
-        - y: Series containing the target values
-        """
         print("Starting evaluation...")
 
         # Initialize evaluator
-        evaluator = NumeraiClassicEvaluator(metrics_list=["mean_std_sharpe", "apy", "max_drawdown"], era_col=self.era_column)
+        evaluator = NumeraiClassicEvaluator(metrics_list=["mean_std_sharpe", "apy", "max_drawdown"],
+                                            era_col=self.era_column)
 
         # Filter X to only include indices for which we have OOF predictions
         oof_index = self.all_oof_predictions.index
@@ -288,8 +301,9 @@ class WalkForward(BaseEstimator, RegressorMixin):
         # Add benchmark predictions
         eval_data['benchmark'] = self.benchmark_predictions.loc[oof_index]
 
-        # Get the list of prediction columns, excluding 'era'
+        # Clip all prediction columns between 0 and 1 - Required by evaluator
         pred_cols = [col for col in self.all_oof_predictions.columns if col != 'era'] + ['benchmark']
+        eval_data[pred_cols] = eval_data[pred_cols].clip(0, 1)
 
         # Perform evaluation for each model's predictions (store overall and per-era results)
         self.evaluation_results = evaluator.full_evaluation(
@@ -313,22 +327,3 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
         print("Evaluation and per-era Numerai correlation computation completed.")
 
-    def predict(self, X):
-        """
-        Predict using the latest trained models.
-
-        Parameters:
-        - X: DataFrame to predict on (same format as during training).
-        """
-        print("Generating predictions using the latest trained models")
-
-        X_data = X.drop(columns=[self.era_column])
-
-        # Collect predictions from all latest trained models
-        base_model_predictions = pd.DataFrame(
-            {model_name: self.latest_trained_models[model_name].predict(X_data)
-             for model_name in self.latest_trained_models},
-            index=X.index
-        )
-
-        return base_model_predictions
