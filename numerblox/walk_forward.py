@@ -114,10 +114,23 @@ class WalkForward(BaseEstimator, RegressorMixin):
         train_data = X_train.drop(columns=[self.era_column])  # Initial training data
         train_targets = y_train
 
-        # Benchmark DataFrame to collect predictions
+        # Benchmark DataFrame to collect predictions (only for base models, not meta models)
         benchmark_predictions = pd.DataFrame(index=X_test.index)
 
-        total_tasks = len(self.model_names) * len(eras_test)  # Models * test eras
+        # Generate benchmark predictions using the models loaded from disk (no retraining)
+        for model, model_name in zip(self.models, self.model_names):
+            print(f"Generating benchmark predictions for {model_name} on the entire test set.")
+
+            # Drop the 'era' column for the test data
+            test_data = X_test.drop(columns=[self.era_column])
+
+            # Make predictions for the entire test set using the loaded model
+            benchmark_predictions[f'{model_name}_benchmark'] = model.predict(test_data)
+
+        print("Benchmark predictions generated using models loaded from disk.")
+
+        # Initialize variables for walk-forward training
+        total_tasks = len(self.models) * len(eras_test)  # Models * test eras
         task_count = 0  # To track progress
 
         for test_era in tqdm(eras_test, desc="Walk-forward training"):
@@ -194,8 +207,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
             self.oof_targets.append(test_targets)
             self.eras_trained_on.append(test_era)
 
-            benchmark_predictions.loc[test_data.index, 'benchmark'] = combined_predictions.iloc[:, 0]
-
             if self.meta is not None:
                 for window_size in self.meta_eras:  # Use window_size directly without subtracting 1
                     # Ensure there are enough OOF predictions to form the meta model
@@ -260,9 +271,9 @@ class WalkForward(BaseEstimator, RegressorMixin):
                                 self.models.append(meta_model.ensemble_model)
                                 self.model_names.append(meta_model_name)
 
-                    # Update train data by concatenating test data after each iteration
-                    train_data = pd.concat([train_data, test_data])
-                    train_targets = pd.concat([train_targets, test_targets])
+            # Update train data by concatenating test data after each iteration
+            train_data = pd.concat([train_data, test_data])
+            train_targets = pd.concat([train_targets, test_targets])
 
         # Save final models if final_models_dir is set
         if self.final_models_dir is not None:
@@ -292,17 +303,18 @@ class WalkForward(BaseEstimator, RegressorMixin):
         oof_index = self.all_oof_predictions.index
 
         # Prepare OOF predictions and benchmark for the filtered eras, ensuring no duplication of 'era'
-        eval_data = pd.concat([X.loc[oof_index].drop(columns=['era']), y.loc[oof_index]], axis=1)
+        eval_data = pd.concat([X.loc[oof_index].drop(columns=[self.era_column]), y.loc[oof_index]], axis=1)
         eval_data['target'] = y.loc[oof_index]
 
         # Add OOF predictions (which already include the 'era' column)
         eval_data = pd.concat([eval_data, self.all_oof_predictions.loc[oof_index]], axis=1)
 
-        # Add benchmark predictions
-        eval_data['benchmark'] = self.benchmark_predictions.loc[oof_index]
+        # Add all benchmark predictions (all columns that end with "_benchmark")
+        benchmark_cols = [col for col in self.benchmark_predictions.columns if col.endswith('_benchmark')]
+        eval_data = pd.concat([eval_data, self.benchmark_predictions.loc[oof_index, benchmark_cols]], axis=1)
 
         # Clip all prediction columns between 0 and 1 - Required by evaluator
-        pred_cols = [col for col in self.all_oof_predictions.columns if col != 'era'] + ['benchmark']
+        pred_cols = [col for col in self.all_oof_predictions.columns if col != 'era'] + benchmark_cols
         eval_data[pred_cols] = eval_data[pred_cols].clip(0, 1)
 
         # Perform evaluation for each model's predictions (store overall and per-era results)
@@ -326,4 +338,5 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.per_era_numerai_corr = pd.DataFrame(per_era_numerai_corr)
 
         print("Evaluation and per-era Numerai correlation computation completed.")
+
 
