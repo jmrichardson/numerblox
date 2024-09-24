@@ -334,12 +334,13 @@ class MetaModel(BaseEstimator, RegressorMixin):
             estimators_list.append((model_name, model))
 
         self.ensemble_model = VotingRegressor(estimators=estimators_list, weights=weights_list)
-        self.ensemble_model.fit(X, y)
+        self.ensemble_model.fit(X, y)  # dummy fit
 
         return self
 
     def predict(self, X: pd.DataFrame) -> pd.Series:
-        return pd.Series(self.ensemble_model.predict(X), index=X.index)
+        results = pd.Series(self.ensemble_model.predict(X), index=X.index)
+        return results
 
     def get_params(self, deep=True):
         return {

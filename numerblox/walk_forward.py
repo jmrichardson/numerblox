@@ -255,7 +255,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                             else:
                                 # Fit the meta model only if no cache is found
                                 meta_model.fit(base_models_predictions, true_targets, recent_eras, model_name_to_path,
-                                               train_data, train_targets)
+                                               train_data.drop(columns=['era']), train_targets)
                                 model_path = self._save_model(meta_model.ensemble_model, trained_meta_model_name)
                                 print(f"Saved meta model: {trained_meta_model_name} to {model_path}")
 
@@ -264,7 +264,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                             self.latest_trained_models[meta_model_name] = meta_model.ensemble_model
 
                             # Make predictions using the meta model
-                            meta_predictions = meta_model.predict(test_data)
+                            meta_predictions = meta_model.predict(test_data.drop(columns=['era']))
                             combined_predictions[meta_model_name] = meta_predictions
 
                             if meta_model_name not in self.model_names:
