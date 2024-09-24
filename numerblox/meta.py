@@ -282,13 +282,14 @@ import os
 
 
 class MetaModel(BaseEstimator, RegressorMixin):
-    def __init__(self, max_ensemble_size: int = 7, random_state: int = 42, weight_factor: float = None):
+    def __init__(self, max_ensemble_size: int = 7, random_state: int = 42, weight_factor: float = None, meta_eras: list = [1, 3, 12]):
         self.max_ensemble_size = max_ensemble_size
         self.random_state = random_state
         self.selected_model_names = []
         self.selected_models = []
         self.ensemble_model = None
         self.weight_factor = weight_factor
+        self.meta_eras = meta_eras
 
     def fit(
             self,
@@ -346,12 +347,14 @@ class MetaModel(BaseEstimator, RegressorMixin):
         return {
             'max_ensemble_size': self.max_ensemble_size,
             'random_state': self.random_state,
-            'weight_factor': self.weight_factor
+            'weight_factor': self.weight_factor,
+            'meta_eras': self.meta_eras
         }
 
     def set_params(self, **params):
         for param, value in params.items():
             setattr(self, param, value)
         return self
+
 
 

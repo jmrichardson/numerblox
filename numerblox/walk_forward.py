@@ -7,7 +7,10 @@ from sklearn.base import BaseEstimator, RegressorMixin, clone
 from tqdm import tqdm
 from numerblox.evaluation import NumeraiClassicEvaluator
 from numerblox.misc import get_cache_hash
-
+import matplotlib.pyplot as plt
+from datetime import datetime
+import base64
+from io import BytesIO
 
 
 def _check_sklearn_compatibility(model):
@@ -17,18 +20,18 @@ def _check_sklearn_compatibility(model):
     if not hasattr(model, "predict") or not callable(getattr(model, "predict")):
         raise ValueError(f"Model {model} does not implement a 'predict' method.")
 
-# Walk-forward training class
+
 class WalkForward(BaseEstimator, RegressorMixin):
 
-    def __init__(self, model_paths, horizon_eras=4, era_column="era", meta=None, meta_eras=[1, 3, 12],
-                 era_models_dir='tmp/era_models', final_models_dir='tmp/final_models'):
+    def __init__(self, model_paths, horizon_eras=4, era_column="era", meta=None,
+                 era_models_dir='tmp/era_models', final_models_dir='tmp/final_models', create_report=True,
+                 expand_train=False, train_weights=None):
         """
         Parameters:
         - model_paths: List of paths to pre-trained sklearn models (.pkl)
         - horizon_eras:  Number of eras of prediction time frame
         - era_column: Column name in X that contains the era indicator
         - meta: Meta ensemble instance (can be None)
-        - meta_eras: List of integers specifying window sizes for meta models
         - era_models_dir: Directory to save interim models per era
         - final_models_dir: Directory to save final models (if None, do not save final models)
         """
@@ -43,9 +46,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.oof_targets = []
         self.eras_trained_on = []
         self.meta = meta  # Ensemble instance passed from outside
-        self.meta_eras = meta_eras  # List of window sizes for meta models
         self.era_models_dir = era_models_dir
         self.final_models_dir = final_models_dir
+        self.create_report = create_report
+        self.expand_train = expand_train
+        self.train_weights = train_weights
 
         # Dictionaries to keep track of trained models and their paths
         self.trained_model_paths = {}  # To keep track of trained models and their paths with era
@@ -67,31 +72,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
         self.meta_weights = {}
 
-    def _load_model(self, path):
-        """Load a model from the given path and check its compatibility with sklearn."""
-        print(f"Loading model from: {path}")
-        with open(path, 'rb') as f:
-            model = pickle.load(f)
-        _check_sklearn_compatibility(model)
-        return model
-
-    def _save_model(self, model, model_name, is_final=False):
-        """Save the trained model to the era_models_dir or final_models_dir based on the stage."""
-        if is_final:
-            if self.final_models_dir is None:
-                return None
-            model_dir = self.final_models_dir
-        else:
-            model_dir = self.era_models_dir
-
-        model_path = os.path.join(model_dir, f"{model_name}.pkl")
-        with open(model_path, 'wb') as f:
-            pickle.dump(model, f)
-        print(f"Saved model: {model_name} to {model_path}")
-        return model_path
-
     def fit(self, X_train, y_train, X_test, y_test):
         print("Starting training and walk-forward prediction")
+
+        if self.train_weights is not None and self.expand_train:
+            raise ValueError("expand_train must be False when using train_weights.")
 
         # Extract unique eras from test data
         eras_test = sorted(X_test[self.era_column].unique())
@@ -99,6 +84,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
         # Initialize train_data and train_targets
         train_data = X_train  # Initial training data
         train_targets = y_train
+
+        if self.train_weights is not None:
+            train_weights = self.train_weights
+        else:
+            train_weights = None
 
         # Benchmark DataFrame to collect predictions (only for base models, not meta models)
         benchmark_predictions = pd.DataFrame(index=X_test.index)
@@ -161,7 +151,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 else:
                     # Train the model if it hasn't been trained for this era yet
                     print(f"Training model: {model_name} on training data up to era {test_era}")
-                    model.fit(train_data.drop(columns=[self.era_column]), train_targets)
+                    if train_weights is not None:
+                        model.fit(train_data.drop(columns=[self.era_column]), train_targets,
+                                  sample_weight=train_weights)
+                    else:
+                        model.fit(train_data.drop(columns=[self.era_column]), train_targets)
 
                     # Save the trained model to the cache directory
                     self._save_model(model, trained_model_name)
@@ -182,7 +176,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
             # Now handle meta models, ensuring they predict each era once enough data (window) is available
             if self.meta is not None:
-                for window_size in self.meta_eras:
+                # Fetch meta_eras from the meta model
+                for window_size in self.meta.meta_eras:
                     # Ensure there are enough OOF predictions to form the meta model
                     if len(self.oof_predictions) >= (window_size + self.horizon_eras):
                         print(
@@ -250,9 +245,24 @@ class WalkForward(BaseEstimator, RegressorMixin):
                             # Store meta predictions in the combined predictions for each era
                             combined_predictions[meta_model_name] = meta_predictions
 
-            # Update train data by concatenating test data after each iteration
-            train_data = pd.concat([train_data, test_data])
-            train_targets = pd.concat([train_targets, test_targets])
+            # Update train data based on self.expand_train
+            if self.expand_train:
+                # Expand the train set by including the current test era
+                train_data = pd.concat([train_data, test_data])
+                train_targets = pd.concat([train_targets, test_targets])
+            else:
+                # Maintain the same number of eras in the training set by removing the oldest era
+                eras_in_train = train_data[self.era_column].unique()
+
+                if len(eras_in_train) >= self.horizon_eras:
+                    # Drop the oldest era from the train set
+                    oldest_era = eras_in_train[0]
+                    train_data = train_data[train_data[self.era_column] != oldest_era]
+                    train_targets = train_targets[train_data.index]
+
+                # Add the new era
+                train_data = pd.concat([train_data, test_data])
+                train_targets = pd.concat([train_targets, test_targets])
 
         # After the loop, all meta predictions will be present in the combined_predictions DataFrame
         # Collect all OOF predictions
@@ -265,8 +275,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.evaluate(X_test, y_test)
 
         return self
-
-
 
     def evaluate(self, X, y):
         print("Starting evaluation...")
@@ -300,6 +308,9 @@ class WalkForward(BaseEstimator, RegressorMixin):
             target_col='target',
         )
         self.evaluation_results = self.evaluation_results.sort_values(by='mean', ascending=False)
+        # Modify self.evaluation_results: Drop "target" column and bring index to first column named "model"
+        self.evaluation_results = self.evaluation_results.drop(columns=["target"]).reset_index().rename(
+            columns={'index': 'model'})
 
         # Compute Numerai correlation per era for each model and the benchmark
         per_era_numerai_corr = {}
@@ -314,5 +325,114 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.per_era_numerai_corr = pd.DataFrame(per_era_numerai_corr)
 
         print("Evaluation and per-era Numerai correlation computation completed.")
+
+        # Create HTML report
+        if self.create_report:
+            self.create_html_report()
+
+
+    def create_html_report(self):
+        # Define the path to save the report
+        timestamp = datetime.now().strftime('%Y_%d_%m_%H_%M')
+        report_dir = 'tmp/reports'
+        report_path = f'{report_dir}/report_{timestamp}.html'
+
+        # Ensure the directory exists
+        os.makedirs(report_dir, exist_ok=True)
+
+        # Convert evaluation results to HTML
+        evaluation_html = self.evaluation_results.to_html(index=False)
+
+        # Convert per-era Numerai correlation DataFrame to HTML
+        per_era_corr_html = self.per_era_numerai_corr.to_html(index=True)
+
+        # Plot and save the correlation graph to a buffer
+        plt.figure(figsize=(10, 6), dpi=150)  # Set the figure size and DPI directly
+        self.per_era_numerai_corr.plot()
+        plt.title("Per-Era Numerai Correlations", fontsize=16)
+        plt.xlabel("Era", fontsize=14)
+        plt.ylabel("Correlation", fontsize=14)
+        plt.tight_layout()  # Ensure everything fits within the figure area
+
+        # Save plot to a buffer instead of file
+        buf = BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight')
+        plt.close()
+        buf.seek(0)
+
+        # Convert image to base64 string
+        img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+        img_base64_str = f"data:image/png;base64,{img_base64}"
+
+        # Create the HTML content
+        html_content = f"""
+        <html>
+        <head>
+            <title>Evaluation Report - {timestamp}</title>
+            <style>
+                body {{
+                    font-family: Arial, sans-serif;
+                }}
+                table {{
+                    width: 100%;
+                    border-collapse: collapse;
+                }}
+                table, th, td {{
+                    border: 1px solid black;
+                }}
+                th, td {{
+                    padding: 8px;
+                    text-align: left;
+                }}
+                img {{
+                    display: block;
+                    margin: 20px auto;
+                }}
+            </style>
+        </head>
+        <body>
+
+            <h2>Evaluation Results</h2>
+            {evaluation_html}
+
+            <h2>Per-Era Numerai Correlation Table</h2>
+            {per_era_corr_html}
+
+            <h2>Per-Era Numerai Correlation Plot</h2>
+            <img src="{img_base64_str}" alt="Per-Era Numerai Correlation">
+
+        </body>
+        </html>
+        """
+
+        # Write the HTML content to the report file
+        with open(report_path, 'w') as file:
+            file.write(html_content)
+
+        print(f"Report saved to {report_path}")
+
+    def _load_model(self, path):
+        """Load a model from the given path and check its compatibility with sklearn."""
+        print(f"Loading model from: {path}")
+        with open(path, 'rb') as f:
+            model = pickle.load(f)
+        _check_sklearn_compatibility(model)
+        return model
+
+    def _save_model(self, model, model_name, is_final=False):
+        """Save the trained model to the era_models_dir or final_models_dir based on the stage."""
+        if is_final:
+            if self.final_models_dir is None:
+                return None
+            model_dir = self.final_models_dir
+        else:
+            model_dir = self.era_models_dir
+
+        model_path = os.path.join(model_dir, f"{model_name}.pkl")
+        with open(model_path, 'wb') as f:
+            pickle.dump(model, f)
+        print(f"Saved model: {model_name} to {model_path}")
+        return model_path
+
 
 
