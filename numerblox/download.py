@@ -648,3 +648,89 @@ class EODDownloader(BaseDownloader):
             print(f"WARNING: Date pull failed on ticker: '{ticker}'. Exception: {e}")
             stock_df = pd.DataFrame()
         return stock_df
+
+
+import numpy as np
+import pandas as pd
+
+
+class SyntheticNumeraiData:
+    def __init__(self,
+                 n_rows_per_era: int = 500,
+                 n_features: int = 10,
+                 alpha: float = 0.5,
+                 n_train_eras: int = 15,
+                 n_test_eras: int = 5,
+                 split_target: bool = True,
+                 random_state: int = None):
+        self.n_rows_per_era = n_rows_per_era
+        self.n_features = n_features
+        self.alpha = alpha
+        self.n_train_eras = n_train_eras
+        self.n_test_eras = n_test_eras
+        self.split_target = split_target
+        self.random_state = random_state
+
+        self._validate_params()
+
+    def _validate_params(self):
+        if not isinstance(self.n_rows_per_era, int) or self.n_rows_per_era < 1:
+            raise ValueError("n_rows_per_era must be a positive integer.")
+
+        if not isinstance(self.n_features, int) or self.n_features < 1:
+            raise ValueError("n_features must be a positive integer.")
+
+        if not isinstance(self.alpha, (int, float)) or not (0 <= self.alpha <= 1):
+            raise ValueError("alpha must be a float or integer between 0 and 1 (inclusive).")
+
+        if not isinstance(self.n_train_eras, int) or self.n_train_eras < 1:
+            raise ValueError("n_train_eras must be a positive integer.")
+
+        if not isinstance(self.n_test_eras, int) or self.n_test_eras < 1:
+            raise ValueError("n_test_eras must be a positive integer.")
+
+        if self.n_train_eras + self.n_test_eras > self.n_train_eras + self.n_test_eras:
+            raise ValueError("The sum of n_train_eras and n_test_eras must not exceed the total number of eras.")
+
+        if self.random_state is not None and not isinstance(self.random_state, int):
+            raise ValueError("random_state must be an integer.")
+
+    def generate(self):
+        if self.random_state is not None:
+            np.random.seed(self.random_state)
+
+        # Column names
+        columns = ['era'] + [f'feature_x{i}' for i in range(self.n_features)] + ['target']
+
+        # Target bins for correct binning
+        target_bins = [0.0, 0.25, 0.5, 0.75, 1.0]
+
+        # Generating data with features based on the target and adding noise
+        data = []
+        for era in range(1, self.n_train_eras + self.n_test_eras + 1):
+            for _ in range(self.n_rows_per_era):
+                # Randomly assign target from target_bins
+                target = np.random.choice(target_bins)
+                # Generate features: signal from the target and noise
+                features = [
+                    np.clip(int(self.alpha * target * 4 + (1 - self.alpha) * np.random.randint(0, 5)), 0, 4)
+                    for _ in range(self.n_features)
+                ]
+                # Append era, features, and target to the data
+                data.append([era] + features + [target])
+
+        # Convert to DataFrame
+        data = pd.DataFrame(data, columns=columns)
+
+        # Split data based on eras for train and test sets
+        train_data = data[data['era'] <= self.n_train_eras]
+        test_data = data[data['era'] > self.n_train_eras]
+
+        if self.split_target:
+            X_train = train_data.drop(columns=['target'])
+            y_train = train_data['target']
+            X_test = test_data.drop(columns=['target'])
+            y_test = test_data['target']
+            return X_train, y_train, X_test, y_test
+        else:
+            return train_data, test_data
