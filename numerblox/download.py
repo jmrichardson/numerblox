@@ -664,7 +664,7 @@ class SyntheticNumeraiData:
         Initializes the SyntheticNumeraiData generator.
 
         Args:
-            n_rows_per_era (int): Number of rows per era.
+            n_rows_per_era (int): Number of rows per era ±10% row variation.
             n_features (int): Number of features to generate.
             alpha (float): Weight of the signal in features (0-1).
             n_train_eras (int): Number of eras for training data.
