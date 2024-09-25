@@ -23,13 +23,13 @@ def _check_sklearn_compatibility(model):
 
 class WalkForward(BaseEstimator, RegressorMixin):
 
-    def __init__(self, model_paths, horizon_eras=4, era_column="era", meta=None,
+    def __init__(self, models_attrs, horizon_eras=4, era_column="era", meta=None,
                  era_models_dir='tmp/era_models', final_models_dir='tmp/final_models', create_report=True,
                  expand_train=False, train_weights=None):
         """
         Parameters:
-        - model_paths: List of paths to pre-trained sklearn models (.pkl)
-        - horizon_eras:  Number of eras of prediction time frame
+        - models_attrs: Dictionary containing model paths and associated fit arguments (like sample weights).
+        - horizon_eras: Number of eras of prediction time frame
         - era_column: Column name in X that contains the era indicator
         - meta: Meta ensemble instance (can be None)
         - era_models_dir: Directory to save interim models per era
@@ -37,9 +37,9 @@ class WalkForward(BaseEstimator, RegressorMixin):
         """
         print("Initializing WalkForward class")
 
-        self.model_paths = model_paths
-        self.models = [self._load_model(path) for path in model_paths]  # Load models from disk with validation
-        self.model_names = [os.path.basename(path).replace('.pkl', '') for path in model_paths]  # Extract model names
+        self.models_attrs = models_attrs
+        self.models = {name: self._load_model(attrs['model_path']) for name, attrs in models_attrs.items()}  # Load models
+        self.model_names = list(self.models.keys())  # Extract model names from the dict
         self.horizon_eras = horizon_eras
         self.era_column = era_column
         self.oof_predictions = []
@@ -73,7 +73,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.meta_weights = {}
 
     def fit(self, X_train, y_train, X_test, y_test):
-
         # Validate arguments before proceeding
         self.validate_arguments(X_train, y_train, X_test, y_test)
 
@@ -95,7 +94,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
         benchmark_predictions = pd.DataFrame(index=X_test.index)
 
         # Generate benchmark predictions using the models loaded from disk (no retraining)
-        for model, model_name in zip(self.models, self.model_names):
+        for model_name, model in self.models.items():
             print(f"Generating benchmark predictions for {model_name} on the entire test set.")
 
             # Drop the 'era' column for the test data
@@ -121,7 +120,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
             combined_predictions = pd.DataFrame(index=test_data.index)
 
-            for model, model_name in zip(self.models, self.model_names):
+            for model_name, model in self.models.items():
                 task_count += 1
 
                 # Construct cache ID for identifying model save/load files
@@ -152,11 +151,15 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 else:
                     # Train the model if it hasn't been trained for this era yet
                     print(f"Training model: {model_name} on training data up to era {test_era}")
-                    if train_weights is not None:
-                        model.fit(train_data.drop(columns=[self.era_column]), train_targets,
-                                  sample_weight=train_weights)
-                    else:
-                        model.fit(train_data.drop(columns=[self.era_column]), train_targets)
+
+                    # Fetch fit_kwargs (like sample weights) from models_attrs
+                    fit_kwargs = self.models_attrs[model_name].get('fit_kwargs', {})
+
+                    # Filter out any None values in fit_kwargs
+                    fit_kwargs = {k: v for k, v in fit_kwargs.items() if v is not None}
+
+                    # Fit the model with filtered fit_kwargs
+                    model.fit(train_data.drop(columns=[self.era_column]), train_targets, **fit_kwargs)
 
                     # Save the trained model to the cache directory
                     self._save_model(model, trained_model_name)
@@ -276,6 +279,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.evaluate(X_test, y_test)
 
         return self
+
+
 
     def evaluate(self, X, y):
         print("Starting evaluation...")
@@ -435,7 +440,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
         print(f"Saved model: {model_name} to {model_path}")
         return model_path
 
-
     def validate_arguments(self, X_train, y_train, X_test, y_test):
         """
         Validate user-provided arguments and raise errors or warnings if any inconsistencies are found.
@@ -460,9 +464,9 @@ class WalkForward(BaseEstimator, RegressorMixin):
         if self.era_column not in X_test.columns:
             raise ValueError(f"era_column '{self.era_column}' not found in X_test columns.")
 
-        # Check if model paths are provided and models are loaded correctly
-        if not self.model_paths or len(self.models) == 0:
-            raise ValueError("No model paths provided or models failed to load. Please check model paths.")
+        # Check if models_attrs is provided and models are loaded correctly
+        if not self.models_attrs or len(self.models) == 0:
+            raise ValueError("No models provided or models failed to load. Please check models_attrs.")
 
         # Check if train_weights are valid
         if self.train_weights is not None:
@@ -500,6 +504,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
             raise ValueError(f"Invalid final_models_dir. It must be a string or None, got {self.final_models_dir}.")
 
         print("Arguments validation completed successfully.")
+
 
 
 
