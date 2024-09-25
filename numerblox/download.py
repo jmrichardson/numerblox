@@ -650,10 +650,6 @@ class EODDownloader(BaseDownloader):
         return stock_df
 
 
-import numpy as np
-import pandas as pd
-
-
 class SyntheticNumeraiData:
     def __init__(self,
                  n_rows_per_era: int = 500,
@@ -663,6 +659,19 @@ class SyntheticNumeraiData:
                  n_test_eras: int = 5,
                  split_target: bool = True,
                  random_state: int = 42):
+        """
+        Initializes the SyntheticNumeraiData generator.
+
+        Args:
+            n_rows_per_era (int): Number of rows per era.
+            n_features (int): Number of features to generate.
+            alpha (float): Weight of the signal in features (0-1).
+            n_train_eras (int): Number of eras for training data.
+            n_test_eras (int): Number of eras for testing data.
+            split_target (bool): If True, splits the data into X_train, y_train, X_test, and y_test.
+            random_state (int): Seed for reproducibility.
+
+        """
         self.n_rows_per_era = n_rows_per_era
         self.n_features = n_features
         self.alpha = alpha
@@ -674,28 +683,48 @@ class SyntheticNumeraiData:
         self._validate_params()
 
     def _validate_params(self):
+        """
+        Validates the input parameters to ensure they meet the required criteria.
+        """
+        # n_rows_per_era validation
         if not isinstance(self.n_rows_per_era, int) or self.n_rows_per_era < 1:
             raise ValueError("n_rows_per_era must be a positive integer.")
 
+        # n_features validation
         if not isinstance(self.n_features, int) or self.n_features < 1:
             raise ValueError("n_features must be a positive integer.")
 
+        # alpha validation
         if not isinstance(self.alpha, (int, float)) or not (0 <= self.alpha <= 1):
             raise ValueError("alpha must be a float or integer between 0 and 1 (inclusive).")
 
+        # n_train_eras validation
         if not isinstance(self.n_train_eras, int) or self.n_train_eras < 1:
             raise ValueError("n_train_eras must be a positive integer.")
 
+        # n_test_eras validation
         if not isinstance(self.n_test_eras, int) or self.n_test_eras < 1:
             raise ValueError("n_test_eras must be a positive integer.")
 
-        if self.n_train_eras + self.n_test_eras > self.n_train_eras + self.n_test_eras:
-            raise ValueError("The sum of n_train_eras and n_test_eras must not exceed the total number of eras.")
+        # Ensure the number of rows is enough for the eras
+        if self.n_rows_per_era < 5:
+            raise ValueError(
+                "n_rows_per_era is too small. You need at least 5 rows per era for meaningful data generation.")
 
+        # random_state validation
         if self.random_state is not None and not isinstance(self.random_state, int):
             raise ValueError("random_state must be an integer.")
 
     def generate(self):
+        """
+        Generates synthetic data based on the initialized parameters.
+
+        Returns:
+            Depending on split_target, either:
+            - X_train (pd.DataFrame), y_train (pd.Series), X_test (pd.DataFrame), y_test (pd.Series)
+            OR
+            - train_data (pd.DataFrame), test_data (pd.DataFrame)
+        """
         if self.random_state is not None:
             np.random.seed(self.random_state)
 
@@ -706,7 +735,7 @@ class SyntheticNumeraiData:
         target_bins = [0.0, 0.25, 0.5, 0.75, 1.0]
         targets = np.random.choice(target_bins, size=len(eras))
 
-        # Generate all features in a vectorized way: signal from the target and noise
+        # Generate all features: signal from the target and noise
         noise = np.random.randint(0, 5, size=(len(eras), self.n_features))
         signals = (self.alpha * targets[:, None] * 4).astype(int)
         features = np.clip(signals + (1 - self.alpha) * noise, 0, 4).astype(int)
