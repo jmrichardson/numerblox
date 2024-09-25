@@ -729,8 +729,13 @@ class SyntheticNumeraiData:
         if self.random_state is not None:
             np.random.seed(self.random_state)
 
-        # Generate all eras in one go
-        eras = np.repeat(np.arange(1, self.n_train_eras + self.n_test_eras + 1), self.n_rows_per_era)
+        # Generate random row variations per era by ±10%
+        era_row_counts = np.random.randint(int(self.n_rows_per_era * 0.9), int(self.n_rows_per_era * 1.1),
+                                           size=self.n_train_eras + self.n_test_eras)
+
+        # Generate all eras with varying row counts
+        eras = np.concatenate([np.full(row_count, era_num + 1)
+                               for era_num, row_count in enumerate(era_row_counts)])
 
         # Generate all targets in one go
         target_bins = [0.0, 0.25, 0.5, 0.75, 1.0]

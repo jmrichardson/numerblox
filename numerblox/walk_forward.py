@@ -37,10 +37,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.create_report = create_report
         self.expand_train = expand_train
 
-        # Dictionaries to keep track of latest trained models and their paths
         self.latest_trained_model_paths = {}
 
-        # Create directories if they don't exist
         os.makedirs(self.era_models_dir, exist_ok=True)
         if self.final_models_dir is not None:
             os.makedirs(self.final_models_dir, exist_ok=True)
@@ -62,9 +60,17 @@ class WalkForward(BaseEstimator, RegressorMixin):
         for model_name, model in self.models.items():
             benchmark_predictions[f'{model_name}_benchmark'] = model.predict(test_data_no_era)
 
+        last_era_with_targets = None
+
         for test_era in tqdm(eras_test, desc="Walk-forward training"):
             test_data = X_test[X_test[self.era_column] == test_era]
             test_targets = y_test.loc[test_data.index]
+
+            if not test_targets.notnull().any():
+                print(f"Era {test_era} has no targets; skipping.")
+                continue
+
+            last_era_with_targets = test_era
 
             if train_data.empty or test_data.empty:
                 raise ValueError(f"Empty training or testing data for era {test_era}. Please check your data!")
@@ -77,7 +83,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
                     test_era,
                     model_name,
                     self.horizon_eras,
-                    train_targets,
                     self.models_attrs[model_name],
                 ]
                 cache_hash = get_cache_hash(cache_id)
@@ -90,12 +95,36 @@ class WalkForward(BaseEstimator, RegressorMixin):
                     self.latest_trained_model_paths[model_name] = model_path
                 else:
                     fit_kwargs = self.models_attrs[model_name].get('fit_kwargs', {})
+
+                    # Get the sample weights and apply them based on the current train_data's eras
+                    sample_weights = fit_kwargs.get('sample_weight', None)
+                    if sample_weights is not None:
+                        train_eras = train_data[self.era_column].unique()
+
+                        # Check if sample_weights is a pandas Series
+                        if isinstance(sample_weights, pd.Series):
+                            era_to_weight = {era: sample_weights.iloc[i] for i, era in enumerate(train_eras)}
+                        else:
+                            # Assume sample_weights is a numpy array
+                            era_to_weight = {era: sample_weights[i] for i, era in enumerate(train_eras)}
+
+                        # Apply this mapping to the train_data, assigning weights to each row based on the era
+                        train_weights = train_data[self.era_column].map(era_to_weight)
+
+                        # Set the sample weights in fit_kwargs
+                        fit_kwargs['sample_weight'] = train_weights.values
+
+                    # Filter out None values from fit_kwargs before passing to fit
                     fit_kwargs = {k: v for k, v in fit_kwargs.items() if v is not None}
+
                     model.fit(train_data.drop(columns=[self.era_column]), train_targets, **fit_kwargs)
+
                     self._save_model(model, trained_model_name)
                     self.latest_trained_model_paths[model_name] = model_path
 
-                test_predictions = pd.Series(model.predict(test_data.drop(columns=[self.era_column])),
+                self.models[model_name] = model
+
+                test_predictions = pd.Series(list(model.predict(test_data.drop(columns=[self.era_column]))),
                                              index=test_data.index, name=model_name)
                 combined_predictions[model_name] = test_predictions
 
@@ -107,11 +136,16 @@ class WalkForward(BaseEstimator, RegressorMixin):
             if self.meta is not None:
                 for window_size in self.meta.meta_eras:
                     if len(self.oof_predictions) >= (window_size + self.horizon_eras):
-                        recent_oof_preds = pd.concat(self.oof_predictions[-(window_size + self.horizon_eras):-self.horizon_eras])
-                        recent_oof_targets = pd.concat(self.oof_targets[-(window_size + self.horizon_eras):-self.horizon_eras])
-                        recent_eras_list = self.eras_trained_on[-(window_size + self.horizon_eras):-self.horizon_eras]
+                        recent_oof_preds = pd.concat(
+                            self.oof_predictions[-(window_size + self.horizon_eras):-self.horizon_eras])
+                        recent_oof_targets = pd.concat(
+                            self.oof_targets[-(window_size + self.horizon_eras):-self.horizon_eras])
+                        recent_eras_list = self.eras_trained_on[
+                                           -(window_size + self.horizon_eras):-self.horizon_eras]
                         recent_eras = pd.Series(np.concatenate(
-                            [[era] * len(pred) for era, pred in zip(recent_eras_list, self.oof_predictions[-(window_size + self.horizon_eras):-self.horizon_eras])]
+                            [[era] * len(pred) for era, pred in
+                             zip(recent_eras_list,
+                                 self.oof_predictions[-(window_size + self.horizon_eras):-self.horizon_eras])]
                         ))
                         base_model_columns = [col for col in recent_oof_preds.columns if
                                               not col.startswith('meta_model')]
@@ -147,17 +181,30 @@ class WalkForward(BaseEstimator, RegressorMixin):
                             combined_predictions[meta_model_name] = meta_predictions
 
             if self.expand_train:
+                # Expand training data and targets without size constraints
                 train_data = pd.concat([train_data, test_data])
                 train_targets = pd.concat([train_targets, test_targets])
             else:
+                # Sliding window logic: ensure the training set size remains constant
                 eras_in_train = train_data[self.era_column].unique()
-                if len(eras_in_train) >= self.horizon_eras:
+
+                # Check if the number of training eras exceeds the number of unique eras in train_data (not related to horizon_eras)
+                if len(eras_in_train) > 0:  # Assuming you want to keep at least 1 era
+                    # Remove the oldest era from the training data and targets
                     oldest_era = eras_in_train[0]
                     keep_indices = train_data[train_data[self.era_column] != oldest_era].index
                     train_data = train_data.loc[keep_indices]
                     train_targets = train_targets.loc[keep_indices]
+
+                # Add the new era's data and corresponding targets from test
                 train_data = pd.concat([train_data, test_data])
                 train_targets = pd.concat([train_targets, test_targets])
+
+        if self.final_models_dir is not None and last_era_with_targets is not None:
+            for model_name, model in self.models.items():
+                final_model_name = f"{model_name}"
+                self._save_model(model, final_model_name, is_final=True)
+            print(f"Final models saved to {self.final_models_dir}")
 
         for idx, era in enumerate(self.eras_trained_on):
             self.oof_predictions[idx]['era'] = era

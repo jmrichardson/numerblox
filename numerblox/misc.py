@@ -55,6 +55,10 @@ def get_sample_weights(data, wfactor=.2, eras=None):
     weights = np.exp(-np.arange(num_weights) / (wfactor * num_weights))[::-1]
     normalized_weights = weights * (num_weights / weights.sum())
 
+    if eras is None and 'era' in data_copy.columns:
+        # If eras is not supplied, try to get it from the data's "era" column
+        eras = data_copy['era']
+
     if eras is not None:
         # Ensure eras are treated as string or categorical values
         data_copy['era'] = eras.values
