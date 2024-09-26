@@ -659,19 +659,21 @@ class SyntheticNumeraiData:
                  n_train_eras: int = 30,
                  n_test_eras: int = 15,
                  split_target: bool = True,
+                 train_test_era_gap: int = 4,
                  random_state: int = 42):
         """
-        Initializes the SyntheticNumeraiData generator.
+        Initializes the SyntheticNumeraiData generator.  Generated Synthetic data does not have same characteristics
+        as real world data.
 
         Args:
             n_rows_per_era (int): Number of rows per era ±10% row variation.
             n_features (int): Number of features to generate.
             alpha (float): Weight of the signal in features (0-1).
-            n_train_eras (int): Number of eras for training data.
+            n_train_eras (int): Number of eras for training data before applying the era gap.
             n_test_eras (int): Number of eras for testing data.
             split_target (bool): If True, splits the data into X_train, y_train, X_test, and y_test.
+            train_test_era_gap (int): Number of eras to remove from the end of the training set to create a gap.
             random_state (int): Seed for reproducibility.
-
         """
         self.n_rows_per_era = n_rows_per_era
         self.n_features = n_features
@@ -680,6 +682,7 @@ class SyntheticNumeraiData:
         self.n_test_eras = n_test_eras
         self.split_target = split_target
         self.random_state = random_state
+        self.train_test_era_gap = train_test_era_gap
 
         self._validate_params()
 
@@ -711,6 +714,10 @@ class SyntheticNumeraiData:
         if self.n_rows_per_era < 5:
             raise ValueError(
                 "n_rows_per_era is too small. You need at least 5 rows per era for meaningful data generation.")
+
+        # train_test_era_gap validation
+        if not isinstance(self.train_test_era_gap, int) or self.train_test_era_gap < 0:
+            raise ValueError("train_test_era_gap must be a non-negative integer.")
 
         # random_state validation
         if self.random_state is not None and not isinstance(self.random_state, int):
@@ -751,9 +758,15 @@ class SyntheticNumeraiData:
         data['era'] = eras
         data['target'] = targets
 
-        # Split data based on eras for train and test sets
-        train_data = data[data['era'] <= self.n_train_eras]
-        test_data = data[data['era'] > self.n_train_eras]
+        # Split data based on eras for train and test sets, with a gap between them
+        max_train_era = self.n_train_eras - self.train_test_era_gap
+        min_test_era = self.n_train_eras + 1
+
+        if max_train_era < 1:
+            raise ValueError("train_test_era_gap is too large, resulting in no training eras left.")
+
+        train_data = data[data['era'] <= max_train_era]
+        test_data = data[data['era'] >= min_test_era]
 
         if self.split_target:
             X_train = train_data.drop(columns=['target'])
@@ -763,3 +776,4 @@ class SyntheticNumeraiData:
             return X_train, y_train, X_test, y_test
         else:
             return train_data, test_data
+

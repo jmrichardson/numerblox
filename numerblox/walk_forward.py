@@ -73,8 +73,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
             last_era_with_targets = test_era
 
-            if train_data.empty or test_data.empty:
-                raise ValueError(f"Empty training or testing data for era {test_era}. Please check your data!")
+            # if train_data.empty or test_data.empty:
+                # raise ValueError(f"Empty training or testing data for era {test_era}. Please check your data!")
 
             combined_predictions = pd.DataFrame(index=test_data.index)
 
@@ -216,6 +216,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
         pred_cols = [col for col in self.all_oof_predictions.columns if col != 'era'] + benchmark_cols
         eval_data[pred_cols] = eval_data[pred_cols].clip(0, 1)
 
+
+
         # Store evaluation results in self and save to CSV
         self.metrics = evaluator.full_evaluation(
             dataf=eval_data,
@@ -260,6 +262,12 @@ class WalkForward(BaseEstimator, RegressorMixin):
                                                  col != self.era_column]
             all_predictions_with_era_target = all_predictions_with_era_target[columns_order]
 
+            all_predictions_with_era_target
+            from numerblox.misc import numerai_corr_weighted
+            target = all_predictions_with_era_target[all_predictions_with_era_target['era'] == '1112']['target']
+            prediction = all_predictions_with_era_target[all_predictions_with_era_target['era'] == '1112']['lgb_model']
+            numerai_corr_weighted(target,prediction)
+
             # Save to CSV
             all_predictions_with_era_target.to_csv(benchmark_predictions_csv_path, index=True)
 
@@ -285,23 +293,64 @@ class WalkForward(BaseEstimator, RegressorMixin):
             raise TypeError(f"y_train must be a pandas Series, got {type(y_train)} instead.")
         if not isinstance(y_test, pd.Series):
             raise TypeError(f"y_test must be a pandas Series, got {type(y_test)} instead.")
+
+        # Ensure y_train has no None values
+        if y_train.isnull().any():
+            raise ValueError("y_train contains None values, but it must not have any.")
+
+        # Ensure y_test has at least one non-None value
+        if y_test.isnull().all():
+            raise ValueError("y_test contains only None values.")
+
+        # Ensure X_train and X_test have the same number of columns
+        if X_train.shape[1] != X_test.shape[1]:
+            raise ValueError(
+                f"X_train and X_test must have the same number of columns. Got {X_train.shape[1]} and {X_test.shape[1]}.")
+
+        # Ensure X_train and y_train have the same number of rows
+        if X_train.shape[0] != y_train.shape[0]:
+            raise ValueError(
+                f"X_train and y_train must have the same number of rows. Got {X_train.shape[0]} and {y_train.shape[0]}.")
+
+        # Ensure X_test and y_test have the same number of rows
+        if X_test.shape[0] != y_test.shape[0]:
+            raise ValueError(
+                f"X_test and y_test must have the same number of rows. Got {X_test.shape[0]} and {y_test.shape[0]}.")
+
         if self.era_column not in X_train.columns:
             raise ValueError(f"era_column '{self.era_column}' not found in X_train columns.")
         if self.era_column not in X_test.columns:
             raise ValueError(f"era_column '{self.era_column}' not found in X_test columns.")
+
         if not self.models_attrs or len(self.models_attrs) == 0:
-            raise ValueError("No models provided or models failed to load. Please check models_attrs.")
+            raise ValueError("No models provided. Please check models_attrs.")
+
         if not isinstance(self.horizon_eras, int) or self.horizon_eras <= 0:
             raise ValueError(f"horizon_eras must be a positive integer, got {self.horizon_eras}.")
+
         if self.meta is not None:
             if not hasattr(self.meta, 'fit'):
                 raise ValueError("Meta model provided must have a 'fit' method for ensemble training.")
             if not hasattr(self.meta, 'meta_eras'):
                 raise ValueError("Meta model provided must have a 'meta_eras' attribute.")
+
         if self.era_models_dir is None or not isinstance(self.era_models_dir, str):
             raise ValueError(f"Invalid era_models_dir. It must be a non-empty string, got {self.era_models_dir}.")
+
         if self.final_models_dir is not None and not isinstance(self.final_models_dir, str):
             raise ValueError(f"Invalid final_models_dir. It must be a string or None, got {self.final_models_dir}.")
+
+        if self.artifacts_dir is not None and not isinstance(self.artifacts_dir, str):
+            raise ValueError(f"Invalid artifacts_dir. It must be a string or None, got {self.artifacts_dir}.")
+
+        # Check for at least 4 eras of separation to avoid autocorrelation
+        train_eras = X_train[self.era_column].unique()
+        if len(train_eras) < 4:
+            raise ValueError("X_train must contain at least 4 unique eras for sufficient data separation.")
+
+        era_diffs = np.diff(np.sort(train_eras))
+        if (era_diffs < 4).any():
+            raise ValueError("Eras in X_train must be at least 4 units apart to avoid autocorrelation.")
 
         # Check that sample weights (if provided) are identical within each era
         for model_name, model_attrs in self.models_attrs.items():
@@ -309,11 +358,10 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
             if sample_weights is not None:
                 # Verify that all samples in each era have the same weight
-                train_eras = X_train[self.era_column].unique()
                 if isinstance(sample_weights, pd.Series):
                     for era in train_eras:
                         era_weights = sample_weights[X_train[self.era_column] == era]
-                        if not era_weights.nunique() == 1:
+                        if era_weights.nunique() != 1:
                             raise ValueError(
                                 f"Sample weights must be identical within each era for model {model_name}, but era {era} has varying weights.")
                 elif isinstance(sample_weights, np.ndarray):
