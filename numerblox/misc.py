@@ -39,14 +39,66 @@ def load_key_from_json(file_path: str, *args, **kwargs):
 
 
 def get_cache_hash(*args, **kwds):
+    """
+    Generate a unique cache key based on positional and keyword arguments.
+
+    This function serializes the provided arguments, creates a SHA-256 hash,
+    and returns the first 12 characters of the hash, which can be used as
+    a cache key for functions that need to store results based on input.
+
+    Parameters:
+    -----------
+    *args : tuple
+        Positional arguments to include in the cache key.
+    **kwds : dict
+        Keyword arguments to include in the cache key.
+
+    Returns:
+    --------
+    str
+        A 12-character hexadecimal string representing the cache key.
+    """
+
+    # Sort keyword arguments to ensure consistent ordering and convert them to a string
     sorted_kwargs = str(sorted(kwds.items()))
+
+    # Serialize both positional and keyword arguments using pickle to generate a byte stream
     serialized = pickle.dumps((args, sorted_kwargs))
+
+    # Generate a SHA-256 hash from the serialized arguments
     hash_bytes = hashlib.sha256(serialized).digest()
+
+    # Generate another SHA-256 hash from the first hash and convert to hexadecimal format
     hash_hex = hashlib.sha256(hash_bytes).hexdigest()
+
+    # Return the first 12 characters of the hash as the cache key
     return hash_hex[:12]
 
 
 def get_sample_weights(data, wfactor=.2, eras=None):
+    """
+    Calculate sample weights for the given data, optionally handling weights by era.
+
+    The weights are calculated using an exponential decay function, and if eras are provided
+    (or exist as a column in the data), the weights are averaged across each era.
+
+    Parameters:
+    -----------
+    data : pandas.DataFrame
+        The dataset for which sample weights will be calculated.
+    wfactor : float, optional (default=0.2)
+        A weighting factor that controls the decay rate of the weights. The lower the value, the more
+        weight is concentrated on later entries in the data.
+    eras : pandas.Series, optional (default=None)
+        The era data to assign weights. If not provided, the function will attempt to use the 'era' column
+        from the data.
+
+    Returns:
+    --------
+    pandas.Series
+        A series of sample weights for each row in the input data.
+    """
+
     data_copy = data.copy()  # Create a copy to avoid modifying the original data
 
     num_weights = len(data_copy)

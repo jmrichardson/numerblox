@@ -278,18 +278,42 @@ def make_meta_pipeline(*steps, memory=None, verbose=False) -> MetaPipeline:
     return MetaPipeline(_name_estimators(steps), memory=memory, verbose=verbose)
 
 
-import os
-
-
 class MetaModel(BaseEstimator, RegressorMixin):
+    """
+    A meta-model that ensembles predictions from base models, allowing for flexible weighting and
+    selection of models based on a ensemble method.
+
+    Parameters:
+    -----------
+    max_ensemble_size : int, optional (default=7)
+        The maximum number of models to include in the ensemble.
+    random_state : int, optional (default=42)
+        Random seed for reproducibility.
+    weight_factor : float, optional (default=None)
+        Factor used for generating sample weights. If None, uniform weights are used.
+    meta_eras : list, optional (default=[1, 3, 12])
+        A list of lookback periods for era-based model selection.
+
+    Attributes:
+    -----------
+    selected_model_names : list
+        The names of the models selected for the ensemble.
+    selected_models : list
+        The actual models selected for the ensemble.
+    ensemble_model : VotingRegressor
+        The final ensemble model, which combines the base models.
+    weights_ : pandas.Series
+        The weights assigned to each base model in the ensemble.
+    """
+
     def __init__(self, max_ensemble_size: int = 7, random_state: int = 42, weight_factor: float = None, meta_eras: list = [1, 3, 12]):
         self.max_ensemble_size = max_ensemble_size
         self.random_state = random_state
-        self.selected_model_names = []
-        self.selected_models = []
-        self.ensemble_model = None
-        self.weight_factor = weight_factor
-        self.meta_eras = meta_eras
+        self.selected_model_names = []  # List to store the names of selected models
+        self.selected_models = []  # List to store the actual models
+        self.ensemble_model = None  # Placeholder for the final ensemble model
+        self.weight_factor = weight_factor  # Weight factor used in sample weighting
+        self.meta_eras = meta_eras  # Lookback periods for era-based model selection
 
     def fit(
             self,
@@ -301,49 +325,114 @@ class MetaModel(BaseEstimator, RegressorMixin):
             y: pd.Series,
             ensemble_method=GreedyEnsemble,
     ) -> 'MetaModel':
-        """Fit the ensemble by selecting base models using the provided or default ensemble method."""
+        """
+        Fit the meta-model by selecting base models and creating an ensemble.
 
+        This method selects the best base models using the specified ensemble method (default is GreedyEnsemble),
+        optionally applying sample weights based on the provided `weight_factor` and `eras`. It then constructs
+        a weighted VotingRegressor as the final ensemble model.
+
+        Parameters:
+        -----------
+        base_models_predictions : pd.DataFrame
+            Predictions from base models for each sample.
+        true_targets : pd.Series
+            The true target values corresponding to the predictions.
+        eras : pd.Series
+            Era information used to assign weights to the samples if `weight_factor` is specified.
+        model_name_to_path : dict
+            A mapping from model names to file paths where the models are stored.
+        X : pd.DataFrame
+            The input data used for fitting the final ensemble model.
+        y : pd.Series
+            The true target values used for fitting the final ensemble model.
+        ensemble_method : object, optional (default=GreedyEnsemble)
+            The method used to select models for the ensemble. Must implement a `fit` method.
+
+        Returns:
+        --------
+        MetaModel
+            The fitted meta-model instance.
+        """
+
+        # If weight_factor is provided, calculate sample weights based on eras
         if self.weight_factor is not None:
             sample_weights = get_sample_weights(base_models_predictions, wfactor=self.weight_factor, eras=eras)
         else:
+            # Otherwise, use uniform weights
             sample_weights = pd.Series(1, index=base_models_predictions.index)
 
+        # If ensemble_method is passed as a class, instantiate it
         if isinstance(ensemble_method, type):
             ensemble_method = ensemble_method(max_ensemble_size=self.max_ensemble_size, random_state=self.random_state)
 
+        # Filter valid rows (where true_targets are not null)
         valid_idx = true_targets.notnull()
         base_models_predictions = base_models_predictions.loc[valid_idx]
         true_targets = true_targets.loc[valid_idx]
 
+        # Fit the ensemble method with base model predictions, true targets, and sample weights
         ensemble_method.fit(base_models_predictions, true_targets, sample_weights)
 
+        # Get the names of the selected models and their weights
         self.selected_model_names = ensemble_method.selected_model_names_
         self.weights_ = ensemble_method.weights_
 
+        # Load the selected models from disk
         self.selected_models = []
         for model_name in self.selected_model_names:
-            model_path = model_name_to_path[model_name]
+            model_path = model_name_to_path[model_name]  # Get the path of the model
             with open(model_path, 'rb') as f:
-                model = pickle.load(f)
-            self.selected_models.append((model_name, model))
+                model = pickle.load(f)  # Load the model from the file
+            self.selected_models.append((model_name, model))  # Add the model to the list
 
+        # Prepare the final VotingRegressor ensemble model
         weights_list = []
         estimators_list = []
         for model_name, model in self.selected_models:
-            weight = self.weights_.loc[model_name]
-            weights_list.append(weight)
-            estimators_list.append((model_name, model))
+            weight = self.weights_.loc[model_name]  # Get the weight for the model
+            weights_list.append(weight)  # Add the weight to the list
+            estimators_list.append((model_name, model))  # Add the model and its name to the list
 
+        # Create the VotingRegressor with the selected models and their corresponding weights
         self.ensemble_model = VotingRegressor(estimators=estimators_list, weights=weights_list)
-        self.ensemble_model.fit(X, y)  # dummy fit
+        self.ensemble_model.fit(X, y)  # Perform a dummy fit on the final ensemble model
 
-        return self
+        return self  # Return the fitted meta-model instance
 
     def predict(self, X: pd.DataFrame) -> pd.Series:
+        """
+        Predict using the ensemble model.
+
+        Parameters:
+        -----------
+        X : pd.DataFrame
+            The input data for making predictions.
+
+        Returns:
+        --------
+        pd.Series
+            Predictions for each sample in the input data.
+        """
+        # Use the ensemble model to predict and return the results as a pandas Series
         results = pd.Series(self.ensemble_model.predict(X), index=X.index)
         return results
 
     def get_params(self, deep=True):
+        """
+        Get the parameters of the meta-model.
+
+        Parameters:
+        -----------
+        deep : bool, optional (default=True)
+            Whether to return parameters for this estimator and its sub-estimators.
+
+        Returns:
+        --------
+        dict
+            A dictionary containing the parameters of the meta-model.
+        """
+        # Return a dictionary of the model's parameters
         return {
             'max_ensemble_size': self.max_ensemble_size,
             'random_state': self.random_state,
@@ -352,9 +441,20 @@ class MetaModel(BaseEstimator, RegressorMixin):
         }
 
     def set_params(self, **params):
+        """
+        Set the parameters of the meta-model.
+
+        Parameters:
+        -----------
+        **params : dict
+            A dictionary of parameters to set for the meta-model.
+
+        Returns:
+        --------
+        MetaModel
+            The meta-model instance with updated parameters.
+        """
+        # Set each parameter passed in the dictionary
         for param, value in params.items():
             setattr(self, param, value)
-        return self
-
-
-
+        return self  # Return the updated meta-model instance
