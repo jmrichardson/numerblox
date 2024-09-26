@@ -130,6 +130,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
             # Proceed to train and predict
             print(f"Iteration {iteration + 1}")
+            train_eras_unique = train_data[self.era_column].unique()
             print(f"Training eras: {min(train_eras_unique)} - {max(train_eras_unique)} ({len(train_eras_unique)} eras)")
             print(f"Testing era: {test_era}")
             combined_predictions = pd.DataFrame(index=test_data.index)
@@ -161,7 +162,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
                     # Adjust sample weights based on eras, if provided
                     sample_weights = fit_kwargs.get('sample_weight', None)
                     if sample_weights is not None:
-                        train_eras_unique = train_data[self.era_column].unique()
                         if isinstance(sample_weights, pd.Series):
                             era_to_weight = {era: sample_weights.iloc[i] for i, era in enumerate(train_eras_unique)}
                         else:
