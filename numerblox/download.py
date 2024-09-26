@@ -653,11 +653,11 @@ class EODDownloader(BaseDownloader):
 
 class SyntheticNumeraiData:
     def __init__(self,
-                 n_rows_per_era: int = 500,
-                 n_features: int = 10,
-                 alpha: float = 0.5,
-                 n_train_eras: int = 15,
-                 n_test_eras: int = 5,
+                 n_rows_per_era: int = 300,
+                 n_features: int = 5,
+                 alpha: float = 0.1,
+                 n_train_eras: int = 30,
+                 n_test_eras: int = 15,
                  split_target: bool = True,
                  random_state: int = 42):
         """
