@@ -138,5 +138,5 @@ def numerai_corr_weighted(true_targets: pd.Series, predictions: pd.Series, sampl
     corr, _ = stats.pearsonr(weighted_preds, weighted_target)
 
     # Return negative correlation as loss (since lower is better)
-    return -corr
+    return corr
 

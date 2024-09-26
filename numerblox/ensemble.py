@@ -2,10 +2,12 @@ import scipy
 import warnings
 import numpy as np
 import pandas as pd
-from typing import Union, List
 import sklearn
 from sklearn.base import BaseEstimator, TransformerMixin
 from collections import Counter
+from typing import Callable, List, Union
+from sklearn.utils import check_random_state
+from numerblox.misc import numerai_corr_weighted
 
 
 class NumeraiEnsemble(BaseEstimator, TransformerMixin):
@@ -185,13 +187,6 @@ class PredictionReducer(BaseEstimator, TransformerMixin):
         return [f"reduced_prediction_{i}" for i in range(self.n_models)] if not input_features else input_features
 
 
-import numpy as np
-import pandas as pd
-from collections import Counter
-from typing import Callable, List, Union
-from sklearn.utils import check_random_state
-from numerblox.misc import numerai_corr_weighted
-
 class GreedyEnsemble:
     def __init__(self,
                  max_ensemble_size: int = 10,
@@ -203,49 +198,9 @@ class GreedyEnsemble:
                  bag_fraction: float = 0.5,
                  num_bags: int = 20,
                  random_state: Union[int, None] = None):
-        """
-        GreedyEnsemble class implementing ensemble selection from libraries of models.
-
-        This class implements the ensemble selection method described in the paper:
-        "Ensemble Selection from Libraries of Models" by Caruana et al.
-
-        Parameters
-        ----------
-        max_ensemble_size : int, default=10
-            The maximum number of models to include in the ensemble.
-        metric : Callable, default=None
-            The function to evaluate performance. If None, uses `numerai_corr`.
-            Should accept (y_true, y_pred, sample_weight) and return a scalar loss.
-            Lower values indicate better performance.
-        use_replacement : bool, default=True
-            Whether to allow selection with replacement (models can be added multiple times).
-        sorted_initialization : bool, default=False
-            Whether to initialize the ensemble with N best models before starting greedy selection.
-        initial_n : int or None, default=None
-            Number of models to use in initialization if sorted_initialization is True.
-            If None, N will be determined based on validation performance.
-        bagging : bool, default=False
-            Whether to use bagged ensemble selection to reduce overfitting.
-        bag_fraction : float, default=0.5
-            Fraction of models to include in each bag when bagging is True.
-        num_bags : int, default=20
-            Number of bags to use when bagging is True.
-        random_state : int or None, default=None
-            Random state for reproducibility.
-
-        Attributes
-        ----------
-        weights_ : pd.Series
-            Weights of the models in the ensemble after fitting.
-        selected_model_names_ : list of str
-            Names of the models selected in the ensemble.
-        """
 
         self.max_ensemble_size = max_ensemble_size
-        if metric is None:
-            self.metric = numerai_corr
-        else:
-            self.metric = metric
+        self.metric = metric
         self.use_replacement = use_replacement
         self.sorted_initialization = sorted_initialization
         self.initial_n = initial_n
@@ -261,22 +216,13 @@ class GreedyEnsemble:
             base_models_predictions: pd.DataFrame,
             true_targets: pd.Series,
             sample_weights: pd.Series = None):
-        """
-        Fit the greedy ensemble by selecting models based on their performance.
 
-        Parameters
-        ----------
-        base_models_predictions : pd.DataFrame
-            A DataFrame where each column contains predictions from a base model
-            on the validation (hillclimbing) set.
-        true_targets : pd.Series
-            The true target values for the validation set.
-        sample_weights : pd.Series or None, default=None
-            Sample weights to be used in evaluating performance.
+        if base_models_predictions.empty:
+            raise ValueError("No models found in base_models_predictions.")
+        if true_targets.empty:
+            raise ValueError("true_targets cannot be empty.")
 
-        """
         rng = check_random_state(self.random_state)
-
         model_names = base_models_predictions.columns.tolist()
         n_models = len(model_names)
 
@@ -284,211 +230,113 @@ class GreedyEnsemble:
             raise ValueError("Ensemble size cannot be less than one!")
 
         if self.bagging:
-            # Perform bagged ensemble selection
             ensemble_weights_list = []
             for _ in range(self.num_bags):
-                # Sample models to include in this bag
                 n_bag_models = max(1, int(n_models * self.bag_fraction))
                 bag_model_names = rng.choice(model_names, size=n_bag_models, replace=False)
                 bag_predictions = base_models_predictions[bag_model_names]
 
-                # Perform ensemble selection on this bag
                 bag_weights = self._fit_ensemble(bag_predictions, true_targets, sample_weights)
-
-                # Store the weights
                 ensemble_weights_list.append(bag_weights)
 
-            # Average the weights across all bags
             weights_df = pd.concat(ensemble_weights_list, axis=1).fillna(0)
             self.weights_ = weights_df.mean(axis=1)
-            self.weights_ = self.weights_ / self.weights_.sum()
+            self.weights_ = self.weights_ / (self.weights_.sum() + 1e-8)
 
         else:
-            # Perform ensemble selection on all models
             self.weights_ = self._fit_ensemble(base_models_predictions, true_targets, sample_weights)
 
-        # Store selected model names
         self.selected_model_names_ = self.weights_[self.weights_ > 0].index.tolist()
 
     def _fit_ensemble(self,
                       base_models_predictions: pd.DataFrame,
                       true_targets: pd.Series,
                       sample_weights: pd.Series):
-        """
-        Perform ensemble selection on given models.
 
-        This method implements the core ensemble selection algorithm:
-        - Start with an empty ensemble (or initialize with N best models if sorted_initialization is True).
-        - At each iteration, add the model that when combined with the current ensemble
-          yields the best performance on the validation set.
-        - Repeat for max_ensemble_size iterations or until no improvement can be made.
-        - Select the ensemble from the nested ensembles that has the best validation performance.
-        - Calculate model weights based on their frequency in the selected ensemble.
-
-        Parameters
-        ----------
-        base_models_predictions : pd.DataFrame
-            Predictions from the base models on the validation set.
-        true_targets : pd.Series
-            True target values for the validation set.
-        sample_weights : pd.Series or None
-            Sample weights for performance evaluation.
-
-        Returns
-        -------
-        weights : pd.Series
-            Weights of the models in the ensemble.
-
-        """
         model_names = base_models_predictions.columns.tolist()
-
-        # Initialize variables
         current_ensemble_predictions = pd.Series(0.0, index=base_models_predictions.index)
         ensemble_indices = []
         ensemble_scores = []
         used_model_counts = Counter()
 
-        # If sorted_initialization is True, initialize with N best models
         if self.sorted_initialization:
-            # Compute individual model performances
-            model_losses = {}
+            model_scores = {}
             for model_name in model_names:
                 predictions = base_models_predictions[model_name]
-                loss = self.metric(true_targets, predictions, sample_weight=sample_weights)
-                model_losses[model_name] = loss
-            # Sort models by performance (lower loss is better)
-            sorted_models = sorted(model_losses.items(), key=lambda x: x[1])
+                score = self.metric(true_targets, predictions, sample_weight=sample_weights)
+                model_scores[model_name] = score
+            sorted_models = sorted(model_scores.items(), key=lambda x: x[1], reverse=True)
             if self.initial_n is None:
-                # Determine N based on performance improvements
-                N = self._determine_initial_n([loss for name, loss in sorted_models])
+                N = self._determine_initial_n([score for name, score in sorted_models])
             else:
                 N = self.initial_n
-            # Add N best models to the ensemble
             for i in range(N):
                 model_name = sorted_models[i][0]
                 current_ensemble_predictions += base_models_predictions[model_name]
                 ensemble_indices.append(model_name)
                 used_model_counts[model_name] += 1
-            # Normalize current ensemble predictions
             current_ensemble_predictions /= N
 
-        # Perform greedy ensemble selection
         for _ in range(self.max_ensemble_size):
             best_score = None
             best_model_name = None
 
-            # Loop over candidate models
             if self.use_replacement:
                 candidate_model_names = model_names
             else:
                 candidate_model_names = [name for name in model_names if name not in used_model_counts]
 
             if not candidate_model_names:
-                # No more models to select
                 break
 
             for model_name in candidate_model_names:
                 model_predictions = base_models_predictions[model_name]
-                # Combine current ensemble predictions with this model's predictions
-                combined_predictions = (current_ensemble_predictions * len(ensemble_indices) + model_predictions) / (len(ensemble_indices) + 1)
+                combined_predictions = (current_ensemble_predictions * len(ensemble_indices) + model_predictions) / (
+                            len(ensemble_indices) + 1)
 
-                # Calculate loss for this combined ensemble
-                loss = self.metric(true_targets, combined_predictions, sample_weight=sample_weights)
+                score = self.metric(true_targets, combined_predictions, sample_weight=sample_weights)
 
-                if best_score is None or loss < best_score:
-                    best_score = loss
+                if best_score is None or score > best_score:
+                    best_score = score
                     best_model_name = model_name
 
             if best_model_name is None:
-                # No improvement can be made
                 break
 
-            # Update the ensemble
             ensemble_indices.append(best_model_name)
             used_model_counts[best_model_name] += 1
-            current_ensemble_predictions = (current_ensemble_predictions * (len(ensemble_indices) - 1) + base_models_predictions[best_model_name]) / len(ensemble_indices)
+            current_ensemble_predictions = (current_ensemble_predictions * (len(ensemble_indices) - 1) +
+                                            base_models_predictions[best_model_name]) / len(ensemble_indices)
             ensemble_scores.append(best_score)
 
-        # Select the ensemble with the best performance on validation set
         if ensemble_scores:
-            best_index = np.argmin(ensemble_scores)
-            best_ensemble_indices = ensemble_indices[:best_index+1]
+            best_index = np.argmax(ensemble_scores)
+            best_ensemble_indices = ensemble_indices[:best_index + 1]
         else:
             best_ensemble_indices = []
 
-        # Calculate weights
         model_counts = Counter(best_ensemble_indices)
-        total_counts = sum(model_counts.values())
+        total_counts = sum(model_counts.values()) or 1
         weights = pd.Series({model_name: count / total_counts for model_name, count in model_counts.items()})
-        # Ensure all models are represented in weights (with zero weight if not used)
         weights = weights.reindex(model_names).fillna(0.0)
 
         return weights
 
-    def _determine_initial_n(self, losses):
-        """
-        Determine the number N of models to use in sorted initialization.
+    def _determine_initial_n(self, scores):
+        if len(scores) <= 1:
+            return 1
 
-        This method selects N based on the performance improvements between
-        successive models in the sorted list. When the improvement falls below
-        a threshold, it stops adding models.
-
-        Parameters
-        ----------
-        losses : list of float
-            Losses of the models sorted in ascending order.
-
-        Returns
-        -------
-        N : int
-            Number of models to use in initialization.
-
-        """
-        threshold = 0.001  # Performance improvement threshold
+        threshold = 0.001
         N = 1
-        for i in range(1, len(losses)):
-            improvement = losses[i-1] - losses[i]
+        for i in range(1, len(scores)):
+            improvement = scores[i] - scores[i - 1]
             if improvement < threshold:
                 break
             N += 1
         return N
 
     def predict(self, base_models_predictions: pd.DataFrame) -> pd.Series:
-        """
-        Predict using the ensemble.
-
-        Parameters
-        ----------
-        base_models_predictions : pd.DataFrame
-            A DataFrame where each column contains predictions from a base model.
-
-        Returns
-        -------
-        predictions : pd.Series
-            The ensemble predictions.
-
-        """
-        # Weight the predictions
         weighted_predictions = base_models_predictions.multiply(self.weights_, axis=1)
         ensemble_predictions = weighted_predictions.sum(axis=1)
         return ensemble_predictions
 
-    def predict_proba(self, base_models_predictions: pd.DataFrame) -> pd.DataFrame:
-        """
-        Predict class probabilities using the ensemble.
-
-        Parameters
-        ----------
-        base_models_predictions : pd.DataFrame
-            A DataFrame where each column contains predicted probabilities from a base model.
-
-        Returns
-        -------
-        predictions : pd.DataFrame
-            The ensemble predicted probabilities.
-
-        """
-        # For classification tasks where predictions are probabilities
-        weighted_predictions = base_models_predictions.multiply(self.weights_, axis=1)
-        ensemble_predictions = weighted_predictions.sum(axis=1)
-        return ensemble_predictions
