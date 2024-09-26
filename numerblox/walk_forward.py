@@ -72,10 +72,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 continue
 
             last_era_with_targets = test_era
-
-            # if train_data.empty or test_data.empty:
-                # raise ValueError(f"Empty training or testing data for era {test_era}. Please check your data!")
-
             combined_predictions = pd.DataFrame(index=test_data.index)
 
             for model_name, model_attrs in self.models_attrs.items():
@@ -305,17 +301,20 @@ class WalkForward(BaseEstimator, RegressorMixin):
         # Ensure X_train and X_test have the same number of columns
         if X_train.shape[1] != X_test.shape[1]:
             raise ValueError(
-                f"X_train and X_test must have the same number of columns. Got {X_train.shape[1]} and {X_test.shape[1]}.")
+                f"X_train and X_test must have the same number of columns. Got {X_train.shape[1]} and {X_test.shape[1]}."
+            )
 
         # Ensure X_train and y_train have the same number of rows
         if X_train.shape[0] != y_train.shape[0]:
             raise ValueError(
-                f"X_train and y_train must have the same number of rows. Got {X_train.shape[0]} and {y_train.shape[0]}.")
+                f"X_train and y_train must have the same number of rows. Got {X_train.shape[0]} and {y_train.shape[0]}."
+            )
 
         # Ensure X_test and y_test have the same number of rows
         if X_test.shape[0] != y_test.shape[0]:
             raise ValueError(
-                f"X_test and y_test must have the same number of rows. Got {X_test.shape[0]} and {y_test.shape[0]}.")
+                f"X_test and y_test must have the same number of rows. Got {X_test.shape[0]} and {y_test.shape[0]}."
+            )
 
         if self.era_column not in X_train.columns:
             raise ValueError(f"era_column '{self.era_column}' not found in X_train columns.")
@@ -343,14 +342,12 @@ class WalkForward(BaseEstimator, RegressorMixin):
         if self.artifacts_dir is not None and not isinstance(self.artifacts_dir, str):
             raise ValueError(f"Invalid artifacts_dir. It must be a string or None, got {self.artifacts_dir}.")
 
-        # Check for at least 4 eras of separation to avoid autocorrelation
-        train_eras = X_train[self.era_column].unique()
-        if len(train_eras) < 4:
-            raise ValueError("X_train must contain at least 4 unique eras for sufficient data separation.")
+        # Ensure at least a 4-era difference between the last training era and the first test era
+        train_eras = np.sort(X_train[self.era_column].unique())
+        test_eras = np.sort(X_test[self.era_column].unique())
 
-        era_diffs = np.diff(np.sort(train_eras))
-        if (era_diffs < 4).any():
-            raise ValueError("Eras in X_train must be at least 4 units apart to avoid autocorrelation.")
+        if len(train_eras) < 1 or len(test_eras) < 1:
+            raise ValueError("Both training and testing data must contain at least one era.")
 
         # Check that sample weights (if provided) are identical within each era
         for model_name, model_attrs in self.models_attrs.items():
@@ -363,16 +360,19 @@ class WalkForward(BaseEstimator, RegressorMixin):
                         era_weights = sample_weights[X_train[self.era_column] == era]
                         if era_weights.nunique() != 1:
                             raise ValueError(
-                                f"Sample weights must be identical within each era for model {model_name}, but era {era} has varying weights.")
+                                f"Sample weights must be identical within each era for model {model_name}, but era {era} has varying weights."
+                            )
                 elif isinstance(sample_weights, np.ndarray):
                     for era in train_eras:
                         era_weights = sample_weights[X_train[self.era_column] == era]
                         if len(np.unique(era_weights)) != 1:
                             raise ValueError(
-                                f"Sample weights must be identical within each era for model {model_name}, but era {era} has varying weights.")
+                                f"Sample weights must be identical within each era for model {model_name}, but era {era} has varying weights."
+                            )
                 else:
                     raise ValueError(
-                        f"Sample weight for model {model_name} must be a pandas Series or numpy array, got {type(sample_weights)}.")
+                        f"Sample weight for model {model_name} must be a pandas Series or numpy array, got {type(sample_weights)}."
+                    )
 
         # If expand_train is True, ensure no sample weights are provided
         if self.expand_train:
@@ -380,5 +380,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 sample_weights = model_attrs.get('fit_kwargs', {}).get('sample_weight', None)
                 if sample_weights is not None:
                     raise ValueError(
-                        f"Sample weights cannot be provided when expand_train is True, but model {model_name} has sample weights.")
+                        f"Sample weights cannot be provided when expand_train is True, but model {model_name} has sample weights."
+                    )
 

@@ -659,11 +659,12 @@ class SyntheticNumeraiData:
                  n_train_eras: int = 30,
                  n_test_eras: int = 15,
                  split_target: bool = True,
-                 train_test_era_gap: int = 4,
+                 train_test_era_gap: int = 0,
+                 test_target_era_nans: int = 5,
                  random_state: int = 42):
         """
-        Initializes the SyntheticNumeraiData generator.  Generated Synthetic data does not have same characteristics
-        as real world data.
+        Initializes the SyntheticNumeraiData generator. Generated synthetic data does not have the same characteristics
+        as real-world data.
 
         Args:
             n_rows_per_era (int): Number of rows per era ±10% row variation.
@@ -673,6 +674,8 @@ class SyntheticNumeraiData:
             n_test_eras (int): Number of eras for testing data.
             split_target (bool): If True, splits the data into X_train, y_train, X_test, and y_test.
             train_test_era_gap (int): Number of eras to remove from the end of the training set to create a gap.
+            test_target_era_nans (int): Number of recent test eras where the target is set to NaN (to simulate
+                                        validation data).
             random_state (int): Seed for reproducibility.
         """
         self.n_rows_per_era = n_rows_per_era
@@ -681,8 +684,9 @@ class SyntheticNumeraiData:
         self.n_train_eras = n_train_eras
         self.n_test_eras = n_test_eras
         self.split_target = split_target
-        self.random_state = random_state
         self.train_test_era_gap = train_test_era_gap
+        self.test_target_era_nans = test_target_era_nans
+        self.random_state = random_state
 
         self._validate_params()
 
@@ -710,10 +714,13 @@ class SyntheticNumeraiData:
         if not isinstance(self.n_test_eras, int) or self.n_test_eras < 1:
             raise ValueError("n_test_eras must be a positive integer.")
 
+        # Ensure test_target_era_nans does not exceed n_test_eras
+        if self.test_target_era_nans > self.n_test_eras:
+            raise ValueError("test_target_era_nans cannot be greater than n_test_eras.")
+
         # Ensure the number of rows is enough for the eras
         if self.n_rows_per_era < 5:
-            raise ValueError(
-                "n_rows_per_era is too small. You need at least 5 rows per era for meaningful data generation.")
+            raise ValueError("n_rows_per_era is too small. You need at least 5 rows per era for meaningful data generation.")
 
         # train_test_era_gap validation
         if not isinstance(self.train_test_era_gap, int) or self.train_test_era_gap < 0:
@@ -768,6 +775,11 @@ class SyntheticNumeraiData:
         train_data = data[data['era'] <= max_train_era]
         test_data = data[data['era'] >= min_test_era]
 
+        # Set the last `test_target_era_nans` eras in the test set to have NaN targets
+        test_eras = sorted(test_data['era'].unique())
+        eras_to_nan = test_eras[-self.test_target_era_nans:]
+        test_data.loc[test_data['era'].isin(eras_to_nan), 'target'] = np.nan
+
         if self.split_target:
             X_train = train_data.drop(columns=['target'])
             y_train = train_data['target']
@@ -776,4 +788,5 @@ class SyntheticNumeraiData:
             return X_train, y_train, X_test, y_test
         else:
             return train_data, test_data
+
 
