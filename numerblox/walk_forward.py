@@ -22,7 +22,7 @@ def _check_sklearn_compatibility(model):
 class WalkForward(BaseEstimator, RegressorMixin):
 
     def __init__(self, models_attrs, horizon_eras=4, era_column="era", meta=None,
-                 era_models_dir='tmp/era_models', final_models_dir='tmp/final_models', create_report=True,
+                 era_models_dir='tmp/era_models', final_models_dir='tmp/final_models', artifacts_dir='tmp/artifacts',
                  expand_train=False):
         self.models_attrs = models_attrs
         self.horizon_eras = horizon_eras
@@ -33,8 +33,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.meta = meta
         self.era_models_dir = era_models_dir
         self.final_models_dir = final_models_dir
-        self.create_report = create_report
         self.expand_train = expand_train
+        self.artifacts_dir = artifacts_dir
 
         self.latest_trained_model_paths = {}
 
@@ -204,7 +204,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.evaluate(X_test, y_test)
         return self
 
-
     def evaluate(self, X, y):
         evaluator = NumeraiClassicEvaluator(metrics_list=["mean_std_sharpe", "apy", "max_drawdown"],
                                             era_col=self.era_column)
@@ -217,86 +216,52 @@ class WalkForward(BaseEstimator, RegressorMixin):
         pred_cols = [col for col in self.all_oof_predictions.columns if col != 'era'] + benchmark_cols
         eval_data[pred_cols] = eval_data[pred_cols].clip(0, 1)
 
-        self.evaluation_results = evaluator.full_evaluation(
+        # Store evaluation results in self and save to CSV
+        self.metrics = evaluator.full_evaluation(
             dataf=eval_data,
             pred_cols=pred_cols,
             target_col='target',
         )
-        self.evaluation_results = self.evaluation_results.drop(columns=["target"]).reset_index().rename(
+        self.metrics = self.metrics.drop(columns=["target"]).reset_index().rename(
             columns={'index': 'model'}).sort_values(by='mean', ascending=False)
 
-        per_era_numerai_corr = {}
+        # Calculate per era correlations and store them in self
+        numerai_corr = {}
         for model_name in pred_cols:
-            per_era_numerai_corr[model_name] = evaluator.per_era_numerai_corrs(
+            numerai_corr[model_name] = evaluator.per_era_numerai_corrs(
                 dataf=eval_data,
                 pred_col=model_name,
                 target_col='target'
             )
-        self.per_era_numerai_corr = pd.DataFrame(per_era_numerai_corr)
+        self.numerai_corr = pd.DataFrame(numerai_corr)
 
-        if self.create_report:
-            self.create_html_report()
+        # Save artifacts if directory is specified
+        if self.artifacts_dir is not None:
+            os.makedirs(self.artifacts_dir, exist_ok=True)
 
-    def create_html_report(self):
-        timestamp = datetime.now().strftime('%Y_%d_%m_%H_%M')
-        report_dir = 'tmp/reports'
-        report_path = f'{report_dir}/report_{timestamp}.html'
-        os.makedirs(report_dir, exist_ok=True)
-        evaluation_html = self.evaluation_results.to_html(index=False)
-        per_era_corr_html = self.per_era_numerai_corr.to_html(index=True)
-        plt.figure(figsize=(10, 6), dpi=150)
-        self.per_era_numerai_corr.plot()
-        plt.title("Per-Era Numerai Correlations", fontsize=16)
-        plt.xlabel("Era", fontsize=14)
-        plt.ylabel("Correlation", fontsize=14)
-        plt.tight_layout()
-        buf = BytesIO()
-        plt.savefig(buf, format='png', bbox_inches='tight')
-        plt.close()
-        buf.seek(0)
-        img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-        img_base64_str = f"data:image/png;base64,{img_base64}"
-        html_content = f"""
-        <html>
-        <head>
-            <title>Evaluation Report - {timestamp}</title>
-            <style>
-                body {{
-                    font-family: Arial, sans-serif;
-                }}
-                table {{
-                    width: 100%;
-                    border-collapse: collapse;
-                }}
-                table, th, td {{
-                    border: 1px solid black;
-                }}
-                th, td {{
-                    padding: 8px;
-                    text-align: left;
-                }}
-                img {{
-                    display: block;
-                    margin: 20px auto;
-                }}
-            </style>
-        </head>
-        <body>
+            # Save numerai_corr to CSV
+            numerai_corr_csv_path = os.path.join(self.artifacts_dir, "numerai_corr.csv")
+            self.numerai_corr.to_csv(numerai_corr_csv_path, index=True)
 
-            <h2>Evaluation Results</h2>
-            {evaluation_html}
+            # Save metrics to CSV
+            metrics_csv_path = os.path.join(self.artifacts_dir, "metrics.csv")
+            self.metrics.to_csv(metrics_csv_path, index=True)
 
-            <h2>Per-Era Numerai Correlation Table</h2>
-            {per_era_corr_html}
+            # Save benchmark predictions (with era column first, target, and all prediction columns) to CSV
+            benchmark_predictions_csv_path = os.path.join(self.artifacts_dir, "benchmark_predictions.csv")
 
-            <h2>Per-Era Numerai Correlation Plot</h2>
-            <img src="{img_base64_str}" alt="Per-Era Numerai Correlation">
+            # Combine all prediction columns (including benchmark) with era and target
+            all_predictions_with_era_target = pd.concat([self.benchmark_predictions, self.all_oof_predictions], axis=1)
+            all_predictions_with_era_target[self.era_column] = X.loc[oof_index, self.era_column]
+            all_predictions_with_era_target['target'] = y.loc[oof_index]
 
-        </body>
-        </html>
-        """
-        with open(report_path, 'w') as file:
-            file.write(html_content)
+            # Reorder columns to place 'era' first
+            columns_order = [self.era_column] + [col for col in all_predictions_with_era_target.columns if
+                                                 col != self.era_column]
+            all_predictions_with_era_target = all_predictions_with_era_target[columns_order]
+
+            # Save to CSV
+            all_predictions_with_era_target.to_csv(benchmark_predictions_csv_path, index=True)
 
     def _load_model(self, path):
         with open(path, 'rb') as f:
@@ -337,4 +302,35 @@ class WalkForward(BaseEstimator, RegressorMixin):
             raise ValueError(f"Invalid era_models_dir. It must be a non-empty string, got {self.era_models_dir}.")
         if self.final_models_dir is not None and not isinstance(self.final_models_dir, str):
             raise ValueError(f"Invalid final_models_dir. It must be a string or None, got {self.final_models_dir}.")
+
+        # Check that sample weights (if provided) are identical within each era
+        for model_name, model_attrs in self.models_attrs.items():
+            sample_weights = model_attrs.get('fit_kwargs', {}).get('sample_weight', None)
+
+            if sample_weights is not None:
+                # Verify that all samples in each era have the same weight
+                train_eras = X_train[self.era_column].unique()
+                if isinstance(sample_weights, pd.Series):
+                    for era in train_eras:
+                        era_weights = sample_weights[X_train[self.era_column] == era]
+                        if not era_weights.nunique() == 1:
+                            raise ValueError(
+                                f"Sample weights must be identical within each era for model {model_name}, but era {era} has varying weights.")
+                elif isinstance(sample_weights, np.ndarray):
+                    for era in train_eras:
+                        era_weights = sample_weights[X_train[self.era_column] == era]
+                        if len(np.unique(era_weights)) != 1:
+                            raise ValueError(
+                                f"Sample weights must be identical within each era for model {model_name}, but era {era} has varying weights.")
+                else:
+                    raise ValueError(
+                        f"Sample weight for model {model_name} must be a pandas Series or numpy array, got {type(sample_weights)}.")
+
+        # If expand_train is True, ensure no sample weights are provided
+        if self.expand_train:
+            for model_name, model_attrs in self.models_attrs.items():
+                sample_weights = model_attrs.get('fit_kwargs', {}).get('sample_weight', None)
+                if sample_weights is not None:
+                    raise ValueError(
+                        f"Sample weights cannot be provided when expand_train is True, but model {model_name} has sample weights.")
 
