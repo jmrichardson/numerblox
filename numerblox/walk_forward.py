@@ -50,6 +50,10 @@ class WalkForward(BaseEstimator, RegressorMixin):
     def fit(self, X_train, y_train, X_test, y_test):
         self.validate_arguments(X_train, y_train, X_test, y_test)
 
+        # Convert era column in X_train and X_test to int for easier comparisons
+        X_train[self.era_column] = X_train[self.era_column].astype(int)
+        X_test[self.era_column] = X_test[self.era_column].astype(int)
+
         # Initialize train_data and train_targets with X_train
         train_data = X_train.sort_values(by=self.era_column).copy()
         train_targets = y_train.loc[train_data.index].copy()
@@ -57,17 +61,19 @@ class WalkForward(BaseEstimator, RegressorMixin):
         # Sort and prepare testing data
         X_test = X_test.sort_values(by=self.era_column).copy()
         y_test = y_test.loc[X_test.index].copy()
-        eras_test = sorted(X_test[self.era_column].unique())
+        eras_test = sorted(X_test[self.era_column].unique())  # Now these are ints
 
         # Determine the starting test era to maintain the horizon gap
         min_test_era = min(eras_test)
-        start_test_era = min_test_era + self.horizon_eras  # Start from era 35
+        start_test_era = min_test_era + self.horizon_eras  # Now safe to add horizon_eras
+
+        # Filter the eras to test
         eras_to_test = [era for era in eras_test if era >= start_test_era]
 
         # For tracking the number of iterations
         iteration = 0
 
-        for test_era in eras_to_test:
+        for test_era in tqdm(eras_to_test, desc="Processing eras"):
             # Prepare test data
             test_data = X_test[X_test[self.era_column] == test_era]
             test_targets = y_test.loc[test_data.index]
@@ -118,13 +124,13 @@ class WalkForward(BaseEstimator, RegressorMixin):
             # Verify the gap between training and testing eras
             last_train_era = max(train_data[self.era_column].unique())
             gap = test_era - last_train_era - 1  # Subtract 1 because eras are inclusive
-            if gap != self.horizon_eras:
+            if gap < self.horizon_eras:
                 raise ValueError(
                     f"Gap between last training era ({last_train_era}) and test era ({test_era}) is {gap}, expected {self.horizon_eras}")
 
             # Proceed to train and predict
             print(f"Iteration {iteration + 1}")
-            print(f"Training eras: {train_data[self.era_column].unique()}")
+            print(f"Training eras: {min(train_eras_unique)} - {max(train_eras_unique)} ({len(train_eras_unique)} eras)")
             print(f"Testing era: {test_era}")
             combined_predictions = pd.DataFrame(index=test_data.index)
 
