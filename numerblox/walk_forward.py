@@ -139,7 +139,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
                     sample_weights = fit_kwargs.get('sample_weight', None)
                     if sample_weights is not None:
-                        era_to_weight = {era: sample_weights[i] for i, era in
+                        era_to_weight = {era: sample_weights.iloc[i] for i, era in
                                          enumerate(train_data[self.era_column].unique())}
                         train_weights = train_data[self.era_column].map(era_to_weight)
                         fit_kwargs['sample_weight'] = train_weights.values
@@ -317,7 +317,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
         # Ensure y_train has no None values
         if y_train.isnull().any():
-            raise ValueError("y_train contains None values, but it must not have any.")
+            raise ValueError("y_train contains None values, it must not have any.")
 
         # Ensure y_test has at least one non-None value
         if y_test.isnull().all():
@@ -385,14 +385,14 @@ class WalkForward(BaseEstimator, RegressorMixin):
                         era_weights = sample_weights[X_train[self.era_column] == era]
                         if era_weights.nunique() != 1:
                             raise ValueError(
-                                f"Sample weights must be identical within each era for model {model_name}, but era {era} has varying weights."
+                                f"Sample weights must be identical within each era for model {model_name}, era {era} has varying weights."
                             )
                 elif isinstance(sample_weights, np.ndarray):
                     for era in train_eras:
                         era_weights = sample_weights[X_train[self.era_column] == era]
                         if len(np.unique(era_weights)) != 1:
                             raise ValueError(
-                                f"Sample weights must be identical within each era for model {model_name}, but era {era} has varying weights."
+                                f"Sample weights must be identical within each era for model {model_name}, era {era} has varying weights."
                             )
                 else:
                     raise ValueError(
@@ -405,6 +405,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 sample_weights = model_attrs.get('fit_kwargs', {}).get('sample_weight', None)
                 if sample_weights is not None:
                     raise ValueError(
-                        f"Sample weights cannot be provided when expand_train is True, but model {model_name} has sample weights."
+                        f"Sample weights cannot be provided when expand_train is True, model {model_name} has sample weights."
                     )
 
