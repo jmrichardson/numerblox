@@ -123,13 +123,13 @@ class WalkForward(BaseEstimator, RegressorMixin):
             print(f"Iteration {iteration + 1}")
             train_eras_unique = train_data[self.era_column].unique()
             print(
-                f"Training eras: {train_eras_unique.min()} - {train_eras_unique.max()} ({len(train_eras_unique)} eras)")
-            print(f"Testing era: {test_era}")
+                f"Train eras: {train_eras_unique.min()} - {train_eras_unique.max()} ({len(train_eras_unique)} eras)")
+            print(f"Test era: {test_era}")
             combined_predictions = pd.DataFrame(index=test_data.index)
 
             for model_name, model_attrs in self.models_attrs.items():
                 cache_id = [train_data.shape, sorted(train_data.columns.tolist()), test_era, model_name,
-                            self.horizon_eras, model_attrs]
+                            self.horizon_eras]
                 cache_hash = get_cache_hash(cache_id)
                 trained_model_name = f"{model_name}_{test_era}_{cache_hash}"
                 model_path = os.path.join(self.era_models_dir, f"{trained_model_name}.pkl")
@@ -171,14 +171,15 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 last_target_era = test_era - self.horizon_eras - 1
                 available_eras = [era for era in self.oof_data['era'].unique() if era <= last_target_era]
                 for window_size in self.meta.meta_eras:
-                    if len(available_eras) >= window_size:
+                    if len(available_eras) >= window_size and len(self.models_attrs) > 1:
                         window_eras = available_eras[-window_size:]
                         print(f"Meta model window size: {window_size}")
                         if len(window_eras) == 1:
+                            print(f"Meta model window size: {window_size}, Era:  {window_eras[0]}")
                             print(f"Meta model window era: {window_eras[0]}")
                         else:
-                            print(f"Meta model window eras: {min(window_eras)} - {max(window_eras)}")
-                        print(f"Prediction test era: {test_era}")
+                            print(f"Meta model window size: {window_size}, Eras: {min(window_eras)} - {max(window_eras)}")
+                        print(f"Test era: {test_era}")
 
                         window_oof_data = self.oof_data[self.oof_data['era'].isin(window_eras)]
 
