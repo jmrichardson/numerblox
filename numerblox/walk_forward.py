@@ -57,8 +57,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
         X_test = X_test.sort_values(by=self.era_column).copy()
         y_test = y_test.loc[X_test.index].copy()
         eras_test = sorted(X_test[self.era_column].unique())
-        min_test_era = min(eras_test)
-        start_test_era = min_test_era + self.horizon_eras
+        start_test_era = min(eras_test) + self.horizon_eras
 
         eras_to_test = [era for era in eras_test if era >= start_test_era]
 
@@ -66,10 +65,9 @@ class WalkForward(BaseEstimator, RegressorMixin):
         predictions = pd.DataFrame(index=X_test.index)
         last_era_with_targets = None
 
-        self.oof_predictions = []
-        self.oof_targets = []
-        self.eras_trained_on = []
+        self.oof_dfs = []
         self.latest_trained_model_paths = {}
+        self.latest_trained_meta_model_paths = {}
         self.meta_weights = {}
         self.oof_data = None
 
@@ -92,12 +90,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
             if iteration > 0:
                 if not self.expand_train:
-                    eras_in_train = train_data[self.era_column].unique()
-                    oldest_era = eras_in_train[0]
+                    oldest_era = train_data[self.era_column].min()
                     train_data = train_data[train_data[self.era_column] != oldest_era]
                     train_targets = train_targets.loc[train_data.index]
 
-                last_train_era = max(train_data[self.era_column].unique())
+                last_train_era = train_data[self.era_column].max()
                 next_train_era = last_train_era + 1
 
                 if next_train_era in X_train[self.era_column].unique():
@@ -114,7 +111,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                     train_data = pd.concat([train_data, new_train_data])
                     train_targets = pd.concat([train_targets, new_train_targets])
 
-            last_train_era = max(train_data[self.era_column].unique())
+            last_train_era = train_data[self.era_column].max()
             gap = test_era - last_train_era
 
             if gap <= self.horizon_eras:
@@ -123,7 +120,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
             print(f"Iteration {iteration + 1}")
             train_eras_unique = train_data[self.era_column].unique()
-            print(f"Training eras: {min(train_eras_unique)} - {max(train_eras_unique)} ({len(train_eras_unique)} eras)")
+            print(
+                f"Training eras: {train_eras_unique.min()} - {train_eras_unique.max()} ({len(train_eras_unique)} eras)")
             print(f"Testing era: {test_era}")
             combined_predictions = pd.DataFrame(index=test_data.index)
 
@@ -146,9 +144,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
                     sample_weights = fit_kwargs.get('sample_weight', None)
                     if sample_weights is not None:
-                        era_to_weight = {era: sample_weights.iloc[i] for i, era in
-                                         enumerate(train_data[self.era_column].unique())}
-                        train_weights = train_data[self.era_column].map(era_to_weight)
+                        era_weights = dict(zip(train_data[self.era_column].unique(), sample_weights))
+                        train_weights = train_data[self.era_column].map(era_weights)
                         fit_kwargs['sample_weight'] = train_weights.values
 
                     fit_kwargs = {k: v for k, v in fit_kwargs.items() if v is not None}
@@ -162,64 +159,36 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 combined_predictions[model_name] = test_predictions
 
             combined_predictions = combined_predictions.reindex(test_data.index)
-            self.oof_predictions.append(combined_predictions)
-            self.oof_targets.append(test_targets)
-            self.eras_trained_on.append(test_era)
+            oof_df = combined_predictions.copy()
+            oof_df['target'] = test_targets
+            oof_df['era'] = test_data[self.era_column]
+            self.oof_dfs.append(oof_df)
 
-            # Concatenate the lists of DataFrames for predictions and targets
-            oof_predictions_combined = pd.concat(self.oof_predictions, axis=0)
-            oof_targets_combined = pd.concat(self.oof_targets, axis=0)
-
-            # Create a series for the eras corresponding to oof_predictions
-            eras_series = pd.Series(
-                [era for era, preds in zip(self.eras_trained_on, self.oof_predictions) for _ in range(len(preds))],
-                index=oof_predictions_combined.index, name='era')
-
-            # Now create the oof_data DataFrame, including the eras
-            self.oof_data = pd.DataFrame({
-                'era': eras_series,
-                'target': oof_targets_combined
-            }).join(oof_predictions_combined)
-
-            # Optionally, sort by era or index to maintain order
-            self.oof_data = self.oof_data.sort_values(by='era')
-
-            # Now handle meta model training and prediction
             if self.meta is not None:
+                self.oof_data = pd.concat(self.oof_dfs)
                 last_target_era = test_era - self.horizon_eras - 1
-                available_eras = [e for e in self.eras_trained_on if e <= last_target_era]
+                available_eras = [era for era in self.oof_data['era'].unique() if era <= last_target_era]
                 for window_size in self.meta.meta_eras:
                     if len(available_eras) >= window_size:
                         window_eras = available_eras[-window_size:]
-                        # Print statements for clarity
                         print(f"Meta model window size: {window_size}")
                         print(f"Meta model window eras: {min(window_eras)} - {max(window_eras)}")
                         print(f"Prediction test era: {test_era}")
 
-                        # Get indices of window eras
-                        indices = [i for i, e in enumerate(self.eras_trained_on) if e in window_eras]
-                        window_oof_preds = pd.concat([self.oof_predictions[i] for i in indices])
-                        window_oof_targets = pd.concat([self.oof_targets[i] for i in indices])
+                        window_oof_data = self.oof_data[self.oof_data['era'].isin(window_eras)]
 
-                        # Create series for window eras
-                        window_eras_series = pd.Series(
-                            [era for era, preds in zip(window_eras, [self.oof_predictions[i] for i in indices]) for _ in
-                             range(len(preds))],
-                            index=window_oof_preds.index)
+                        base_model_columns = [col for col in window_oof_data.columns if
+                                              col not in ['target', 'era'] and not col.startswith('meta_model')]
+                        base_models_predictions = window_oof_data[base_model_columns]
+                        true_targets = window_oof_data['target']
+                        eras_series = window_oof_data['era']
 
-                        base_model_columns = [col for col in window_oof_preds.columns if
-                                              not col.startswith('meta_model')]
-                        base_models_predictions = window_oof_preds[base_model_columns]
-
-                        if window_oof_targets.notnull().any():
-                            true_targets = window_oof_targets
-
-                            model_name_to_path = {}
-                            for col in base_model_columns:
-                                model_path = self.latest_trained_model_paths.get(col)
+                        if true_targets.notnull().any():
+                            model_name_to_path = {col: self.latest_trained_model_paths.get(col)
+                                                  for col in base_model_columns}
+                            for col, model_path in model_name_to_path.items():
                                 if not model_path:
                                     raise ValueError(f"No trained model path found for base model {col}")
-                                model_name_to_path[col] = model_path
 
                             meta_model = clone(self.meta)
                             meta_model_name = f"meta_model_{window_size}"
@@ -232,68 +201,99 @@ class WalkForward(BaseEstimator, RegressorMixin):
                                 with open(model_path, 'rb') as f:
                                     meta_model = pickle.load(f)
                             else:
-                                meta_model.fit(base_models_predictions, true_targets, window_eras_series,
-                                               model_name_to_path,
-                                               train_data.drop(columns=[self.era_column]), train_targets)
+                                combined_df = base_models_predictions.copy()
+                                combined_df['target'] = true_targets
+                                combined_df['era'] = eras_series
+                                meta_model.fit(
+                                    base_models_predictions,
+                                    combined_df['target'],
+                                    combined_df['era'],
+                                    model_name_to_path, train_data.drop(columns=[self.era_column]), train_targets)
                                 with open(model_path, 'wb') as f:
                                     pickle.dump(meta_model, f)
 
+                            self.latest_trained_meta_model_paths[window_size] = model_path
                             self.meta_weights[trained_meta_model_name] = meta_model.weights_
 
                             meta_predictions = meta_model.predict(test_data.drop(columns=[self.era_column]))
                             combined_predictions[meta_model_name] = meta_predictions
 
-                            # Ensure oof_predictions contain both base and meta model predictions
-                            self.oof_predictions[-1] = combined_predictions
+                            oof_df = combined_predictions.copy()
+                            oof_df['target'] = test_targets
+                            oof_df['era'] = test_data[self.era_column]
+                            self.oof_dfs[-1] = oof_df
 
-            # Update iteration
             iteration += 1
 
         if self.final_models_dir is not None and last_era_with_targets is not None:
             print(f"Saving final models to {self.final_models_dir}")
+            # Save the latest retrained base models
             for model_name, model_attrs in self.models_attrs.items():
-                model = self._load_model(model_attrs['model_path'])
-                final_model_name = f"{model_name}"
-                self._save_model(model, final_model_name, is_final=True)
+                model_path = self.latest_trained_model_paths.get(model_name)
+                if model_path:
+                    model = self._load_model(model_path)
+                    final_model_name = f"{model_name}"
+                    self._save_model(model, final_model_name, is_final=True)
+                else:
+                    print(f"No retrained model found for {model_name}")
 
-        for idx, era in enumerate(self.eras_trained_on):
-            self.oof_predictions[idx]['era'] = era
-        self.all_oof_predictions = pd.concat(self.oof_predictions)
-        self.all_oof_targets = pd.concat(self.oof_targets)
+            # Save the latest meta models
+            if self.meta is not None:
+                for window_size, meta_model_path in self.latest_trained_meta_model_paths.items():
+                    meta_model = self._load_model(meta_model_path)
+                    final_meta_model_name = f"meta_model_{window_size}"
+                    self._save_model(meta_model, final_meta_model_name, is_final=True)
+
+        self.oof_data = pd.concat(self.oof_dfs)
         self.predictions = predictions
         self.evaluate(X_test, y_test)
 
         return self
 
     def evaluate(self, X, y):
-        evaluator = NumeraiClassicEvaluator(metrics_list=["mean_std_sharpe", "apy", "max_drawdown"],
-                                            era_col=self.era_column)
-        oof_index = self.all_oof_predictions.index
-        eval_data = pd.concat([X.loc[oof_index].drop(columns=[self.era_column]), y.loc[oof_index]], axis=1)
-        eval_data['target'] = y.loc[oof_index]
-        eval_data = pd.concat([eval_data, self.all_oof_predictions.loc[oof_index]], axis=1)
+        evaluator = NumeraiClassicEvaluator(
+            metrics_list=["mean_std_sharpe", "apy", "max_drawdown"],
+            era_col=self.era_column
+        )
+
+        # Ensure the oof_data and predictions are aligned with the test data
+        oof_index = self.oof_data.index
+        eval_data = X.loc[oof_index].drop(columns=[self.era_column]).copy()
+        # eval_data['target'] = y.loc[oof_index]
+
+        # Merge out-of-fold predictions with eval_data
+        eval_data = pd.concat([eval_data, self.oof_data.loc[oof_index]], axis=1)
+
+        # Collect base model columns and ensure they exist in both oof_data and predictions
         base_cols = [col for col in self.predictions.columns if col.endswith('_base')]
         eval_data = pd.concat([eval_data, self.predictions.loc[oof_index, base_cols]], axis=1)
-        pred_cols = [col for col in self.all_oof_predictions.columns if col != 'era'] + base_cols
-        eval_data[pred_cols] = eval_data[pred_cols].clip(0, 1)
+
+        # Collect all prediction columns (excluding 'era') to clip
+        pred_cols = [col for col in self.oof_data.columns if col not in ['era', 'target']] + base_cols
+
+        # Ensure eval_data contains the prediction columns before clipping
+        valid_pred_cols = eval_data.columns.intersection(pred_cols)
+
+        # Clip predictions between 0 and 1, only for valid columns
+        eval_data[valid_pred_cols] = eval_data[valid_pred_cols].clip(0, 1)
 
         # Store evaluation results in self and save to CSV
         self.metrics = evaluator.full_evaluation(
             dataf=eval_data,
-            pred_cols=pred_cols,
+            pred_cols=valid_pred_cols,
             target_col='target',
-        )
-        self.metrics = self.metrics.drop(columns=["target"]).reset_index().rename(
-            columns={'index': 'model'}).sort_values(by='mean', ascending=False)
+        ).drop(columns=["target"]).reset_index().rename(
+            columns={'index': 'model'}
+        ).sort_values(by='mean', ascending=False)
 
         # Calculate per era correlations and store them in self
-        numerai_corr = {}
-        for model_name in pred_cols:
-            numerai_corr[model_name] = evaluator.per_era_numerai_corrs(
+        numerai_corr = {
+            model_name: evaluator.per_era_numerai_corrs(
                 dataf=eval_data,
                 pred_col=model_name,
                 target_col='target'
-            )
+            ) for model_name in valid_pred_cols
+        }
         self.numerai_corr = pd.DataFrame(numerai_corr)
 
         # Save artifacts if directory is specified
@@ -309,12 +309,9 @@ class WalkForward(BaseEstimator, RegressorMixin):
             self.metrics.to_csv(metrics_csv_path, index=True)
 
             # Combine all prediction columns (including base) with era and target
-            all_predictions_with_era_target = pd.concat([self.predictions, self.all_oof_predictions], axis=1)
+            all_predictions_with_era_target = pd.concat([self.predictions, self.oof_data], axis=1)
             all_predictions_with_era_target[self.era_column] = X.loc[oof_index, self.era_column]
             all_predictions_with_era_target['target'] = y.loc[oof_index]
-
-            # Filter out rows where the target is NaN
-            # all_predictions_with_era_target = all_predictions_with_era_target[all_predictions_with_era_target['target'].notna()]
 
             # Reorder columns to place 'era' first
             columns_order = [self.era_column] + [col for col in all_predictions_with_era_target.columns if
@@ -325,14 +322,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
             predictions_csv_path = os.path.join(self.artifacts_dir, "predictions.csv")
             all_predictions_with_era_target.to_csv(predictions_csv_path, index=True)
 
-            # Reorder columns to place 'era' first
-            columns_order = [self.era_column] + [col for col in all_predictions_with_era_target.columns if
-                                                 col != self.era_column]
-            all_predictions_with_era_target = all_predictions_with_era_target[columns_order]
-
-            all_predictions_with_era_target.to_csv(predictions_csv_path, index=True)
-
-            # Save meta weights to CSV dynamically
+            # Save meta weights to CSV
             meta_weights_csv_path = os.path.join(self.artifacts_dir, "meta_weights_per_era.csv")
             meta_weights_data = pd.DataFrame(self.meta_weights).T  # Transpose to have model names as columns
             meta_weights_data.to_csv(meta_weights_csv_path, index=True)
