@@ -85,8 +85,10 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 print("Generating base model predictions for all base models.")
                 for model_name, model_attrs in self.models_attrs.items():
                     model = self._load_model(model_attrs['model_path'])
-                    predictions[f'{model_name}_base'] = model.predict(
-                        X_test.drop(columns=[self.era_column]))
+                    test_data_filtered = X_test[X_test[self.era_column].isin(eras_to_test)]
+                    predictions_filtered = model.predict(test_data_filtered.drop(columns=[self.era_column]))
+                    predictions.loc[test_data_filtered.index, f'{model_name}_base'] = predictions_filtered
+
 
             if iteration > 0:
                 if not self.expand_train:
@@ -172,7 +174,10 @@ class WalkForward(BaseEstimator, RegressorMixin):
                     if len(available_eras) >= window_size:
                         window_eras = available_eras[-window_size:]
                         print(f"Meta model window size: {window_size}")
-                        print(f"Meta model window eras: {min(window_eras)} - {max(window_eras)}")
+                        if len(window_eras) == 1:
+                            print(f"Meta model window era: {window_eras[0]}")
+                        else:
+                            print(f"Meta model window eras: {min(window_eras)} - {max(window_eras)}")
                         print(f"Prediction test era: {test_era}")
 
                         window_oof_data = self.oof_data[self.oof_data['era'].isin(window_eras)]
