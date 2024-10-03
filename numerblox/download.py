@@ -661,7 +661,8 @@ class SyntheticNumeraiData:
                  split_target: bool = True,
                  train_test_era_gap: int = 0,
                  test_target_era_nans: int = 5,
-                 random_state: int = 42):
+                 random_state: int = 42,
+                 meta: bool = False):
         """
         Initializes the SyntheticNumeraiData generator. Generated synthetic data does not have the same characteristics
         as real-world data.
@@ -677,6 +678,7 @@ class SyntheticNumeraiData:
             test_target_era_nans (int): Number of recent test eras where the target is set to NaN (to simulate
                                         validation data).
             random_state (int): Seed for reproducibility.
+            meta (bool): If True, generates a fictitious prediction for test data.
         """
         self.n_rows_per_era = n_rows_per_era
         self.n_features = n_features
@@ -687,6 +689,7 @@ class SyntheticNumeraiData:
         self.train_test_era_gap = train_test_era_gap
         self.test_target_era_nans = test_target_era_nans
         self.random_state = random_state
+        self.meta = meta
 
         self._validate_params()
 
@@ -774,6 +777,10 @@ class SyntheticNumeraiData:
 
         train_data = data[data['era'] <= max_train_era]
         test_data = data[data['era'] >= min_test_era]
+
+        # Generate fictitious predictions if meta is True
+        if self.meta:
+            test_data['meta'] = np.random.uniform(0, 1, size=len(test_data))
 
         # Set the last `test_target_era_nans` eras in the test set to have NaN targets
         test_eras = sorted(test_data['era'].unique())

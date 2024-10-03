@@ -139,31 +139,13 @@ def get_sample_weights(data, wfactor=.2, eras=None):
     return data_copy['sample_weight']
 
 
-def numerai_corr_weighted(true_targets: pd.Series, predictions: pd.Series, sample_weight: pd.Series = None) -> float:
-    """
-    Computes Numerai correlation (Corrv2).
-    Returns negative correlation as loss (lower is better).
-
-    Parameters
-    ----------
-    true_targets : pd.Series
-        True target values, expected to be in the range [0, 1].
-    predictions : pd.Series
-        Predicted values.
-    sample_weight : pd.Series or None, default=None
-        Sample weights to apply in the correlation calculation.
-
-    Returns
-    -------
-    loss : float
-        Negative Numerai correlation (since lower is better in loss functions).
-    """
+def numerai_corr_weighted(targets: pd.Series, predictions: pd.Series, sample_weight: pd.Series = None) -> float:
     # Rank and gaussianize predictions
     ranked_preds = predictions.fillna(0.5).rank(pct=True, method='average')
     gauss_ranked_preds = stats.norm.ppf(ranked_preds)
 
     # Center target from [0...1] to [-0.5...0.5] range
-    centered_target = true_targets - true_targets.mean()
+    centered_target = targets - targets.mean()
 
     # Accentuate tails of predictions and targets
     preds_p15 = np.sign(gauss_ranked_preds) * np.abs(gauss_ranked_preds) ** 1.5
@@ -192,3 +174,76 @@ def numerai_corr_weighted(true_targets: pd.Series, predictions: pd.Series, sampl
     # Return negative correlation as loss (since lower is better)
     return corr
 
+
+def mmc_weighted(
+    predictions: pd.Series,
+    meta_model: pd.Series,
+    targets: pd.Series,
+    sample_weight: pd.Series = None,
+) -> float:
+
+    DEFAULT_MAX_FILTERED_INDEX_RATIO = 0.2
+
+    # Step 1: Filter and sort indices to match
+    ids = meta_model.dropna().index.intersection(predictions.dropna().index)
+    assert len(ids) / len(meta_model) >= (1 - DEFAULT_MAX_FILTERED_INDEX_RATIO), (
+        "meta_model does not have enough overlapping ids with predictions,"
+        f" must have >= {round(1 - DEFAULT_MAX_FILTERED_INDEX_RATIO,2)*100}% overlapping ids"
+    )
+    assert len(ids) / len(predictions) >= (1 - DEFAULT_MAX_FILTERED_INDEX_RATIO), (
+        "predictions do not have enough overlapping ids with meta_model,"
+        f" must have >= {round(1 - DEFAULT_MAX_FILTERED_INDEX_RATIO,2)*100}% overlapping ids"
+    )
+    meta_model = meta_model.loc[ids].sort_index()
+    predictions = predictions.loc[ids].sort_index()
+
+    ids = targets.dropna().index.intersection(predictions.index)
+    assert len(ids) / len(targets) >= (1 - DEFAULT_MAX_FILTERED_INDEX_RATIO), (
+        "targets do not have enough overlapping ids with predictions,"
+        f" must have >= {round(1 - DEFAULT_MAX_FILTERED_INDEX_RATIO,2)*100}% overlapping ids"
+    )
+    targets = targets.loc[ids].sort_index()
+    predictions = predictions.loc[ids].sort_index()
+    meta_model = meta_model.loc[ids].sort_index()
+
+    if sample_weight is not None:
+        ids = sample_weight.dropna().index.intersection(predictions.index)
+        sample_weight = sample_weight.loc[ids].sort_index()
+        predictions = predictions.loc[ids].sort_index()
+        targets = targets.loc[ids].sort_index()
+        meta_model = meta_model.loc[ids].sort_index()
+
+    # Step 2: Rank and gaussianize predictions and meta_model
+    predictions_ranked = (predictions.rank(method="average") - 0.5) / predictions.count()
+    meta_model_ranked = (meta_model.rank(method="average") - 0.5) / meta_model.count()
+
+    predictions_ranked = predictions_ranked.clip(lower=1e-6, upper=1 - 1e-6)
+    meta_model_ranked = meta_model_ranked.clip(lower=1e-6, upper=1 - 1e-6)
+
+    predictions_gaussianized = stats.norm.ppf(predictions_ranked)
+    meta_model_gaussianized = stats.norm.ppf(meta_model_ranked)
+
+    # Step 3: Orthogonalize predictions with respect to meta_model
+    p = predictions_gaussianized.values
+    m = meta_model_gaussianized.values
+
+    m_dot_m = np.dot(m.T, m)
+    projection = np.dot(p.T, m) / m_dot_m
+    neutral_preds = p - m * projection
+
+    # Step 4: Adjust targets
+    if (targets >= 0).all() and (targets <= 1).all():
+        targets = targets * 4
+    targets = targets - targets.mean()
+    targets_arr = targets.values
+
+    # Step 5: Compute MMC
+    if sample_weight is not None:
+        sample_weight_arr = sample_weight.values
+        numerator = np.sum(sample_weight_arr * targets_arr * neutral_preds)
+        denominator = np.sum(sample_weight_arr)
+        mmc_score = numerator / denominator
+    else:
+        mmc_score = np.dot(targets_arr, neutral_preds) / len(targets_arr)
+
+    return mmc_score

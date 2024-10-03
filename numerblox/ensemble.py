@@ -7,7 +7,7 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from collections import Counter
 from typing import Callable, List, Union
 from sklearn.utils import check_random_state
-from numerblox.misc import numerai_corr_weighted
+from .misc import numerai_corr_weighted, mmc_weighted
 
 
 class NumeraiEnsemble(BaseEstimator, TransformerMixin):
@@ -187,12 +187,17 @@ class PredictionReducer(BaseEstimator, TransformerMixin):
         return [f"reduced_prediction_{i}" for i in range(self.n_models)] if not input_features else input_features
 
 
+def numerai_score(corr, mmc):
+    score = clip(payout_factor * (corr * 0.5 + mmc * 2), -0.05, 0.05)
+    return score
+
+
 class GreedyEnsemble:
     def __init__(self,
                  max_ensemble_size: int = 10,
-                 metric: Callable = numerai_corr_weighted,
+                 metric: Union[str, Callable] = "corr",
                  use_replacement: bool = True,
-                 sorted_initialization: bool = False,
+                 sorted_initialization: bool = True,
                  initial_n: int = None,
                  bagging: bool = False,
                  bag_fraction: float = 0.5,
@@ -200,7 +205,6 @@ class GreedyEnsemble:
                  random_state: Union[int, None] = None):
 
         self.max_ensemble_size = max_ensemble_size
-        self.metric = metric
         self.use_replacement = use_replacement
         self.sorted_initialization = sorted_initialization
         self.initial_n = initial_n
@@ -211,6 +215,20 @@ class GreedyEnsemble:
 
         self.weights_ = None
         self.selected_model_names_ = None
+
+        if isinstance(metric, str):
+            if metric == "corr":
+                self.metric = numerai_corr_weighted
+            elif metric == "mmc":
+                self.metric = mmc_weighted
+            elif metric == "score":
+                self.metric = numerai_score
+            else:
+                raise ValueError("Unsupported metric string. Choose 'corr', 'mmc', or 'score'.")
+        elif callable(metric):
+            self.metric = metric
+        else:
+            raise TypeError("Metric must be a string or a callable.")
 
     def fit(self,
             base_models_predictions: pd.DataFrame,

@@ -58,6 +58,12 @@ class WalkForward(BaseEstimator, RegressorMixin):
         y_test = y_test.loc[X_test.index].copy()
         eras_test = sorted(X_test[self.era_column].unique())
         start_test_era = min(eras_test) + self.horizon_eras
+        if "meta" in X_test:
+            meta = X_test['meta']
+            X_test = X_test.drop(columns=(['meta']))
+        else:
+            meta = None
+
 
         eras_to_test = [era for era in eras_test if era >= start_test_era]
 
@@ -82,13 +88,20 @@ class WalkForward(BaseEstimator, RegressorMixin):
             last_era_with_targets = test_era
 
             if iteration == 0:
-                print("Generating base model predictions for all base models.")
                 for model_name, model_attrs in self.models_attrs.items():
+                    print(f"Fitting and generating predictions for all base model: {model_name}")
                     model = self._load_model(model_attrs['model_path'])
+                    fit_kwargs = model_attrs.get('fit_kwargs', {}).copy()
+                    sample_weights = fit_kwargs.get('sample_weight', None)
+                    if sample_weights is not None:
+                        era_weights = dict(zip(train_data[self.era_column].unique(), sample_weights))
+                        train_weights = train_data[self.era_column].map(era_weights)
+                        fit_kwargs['sample_weight'] = train_weights.values
+                    fit_kwargs = {k: v for k, v in fit_kwargs.items() if v is not None}
+                    model.fit(train_data.drop(columns=[self.era_column]), train_targets, **fit_kwargs)
                     test_data_filtered = X_test[X_test[self.era_column].isin(eras_to_test)]
                     predictions_filtered = model.predict(test_data_filtered.drop(columns=[self.era_column]))
                     predictions.loc[test_data_filtered.index, f'{model_name}_base'] = predictions_filtered
-
 
             if iteration > 0:
                 if not self.expand_train:
@@ -129,7 +142,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
             for model_name, model_attrs in self.models_attrs.items():
                 cache_id = [train_data.shape, sorted(train_data.columns.tolist()), test_era, model_name,
-                            self.horizon_eras]
+                            self.horizon_eras, model_attrs]
                 cache_hash = get_cache_hash(cache_id)
                 trained_model_name = f"{model_name}_{test_era}_{cache_hash}"
                 model_path = os.path.join(self.era_models_dir, f"{trained_model_name}.pkl")
@@ -183,22 +196,22 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
                         window_oof_data = self.oof_data[self.oof_data['era'].isin(window_eras)]
 
-                        base_model_columns = [col for col in window_oof_data.columns if
+                        base_model_names = [col for col in window_oof_data.columns if
                                               col not in ['target', 'era'] and not col.startswith('meta_model')]
-                        base_models_predictions = window_oof_data[base_model_columns]
+                        base_models_predictions = window_oof_data[base_model_names]
                         true_targets = window_oof_data['target']
                         eras_series = window_oof_data['era']
 
                         if true_targets.notnull().any():
                             model_name_to_path = {col: self.latest_trained_model_paths.get(col)
-                                                  for col in base_model_columns}
+                                                  for col in base_model_names}
                             for col, model_path in model_name_to_path.items():
                                 if not model_path:
                                     raise ValueError(f"No trained model path found for base model {col}")
 
                             meta_model = clone(self.meta)
                             meta_model_name = f"meta_model_{window_size}"
-                            cache_id = [window_eras, window_size, test_era, self.horizon_eras]
+                            cache_id = [train_data.shape, sorted(train_data.columns.tolist()), window_eras, window_size, test_era, self.horizon_eras, self.models_attrs]
                             cache_hash = get_cache_hash(cache_id)
                             trained_meta_model_name = f"{meta_model_name}_{test_era}_{cache_hash}"
                             model_path = os.path.join(self.era_models_dir, f"{trained_meta_model_name}.pkl")
@@ -230,6 +243,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
                             self.oof_dfs[-1] = oof_df
 
             iteration += 1
+
+            # evaluate up to this point
+            self.oof_data = pd.concat(self.oof_dfs)
+            self.predictions = predictions
+            self.evaluate(X_test, y_test)
 
         if self.final_models_dir is not None and last_era_with_targets is not None:
             print(f"Saving final models to {self.final_models_dir}")
@@ -366,11 +384,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
         if y_test.isnull().all():
             raise ValueError("y_test contains only None values.")
 
-        # Ensure X_train and X_test have the same number of columns
-        if X_train.shape[1] != X_test.shape[1]:
-            raise ValueError(
-                f"X_train and X_test must have the same number of columns. Got {X_train.shape[1]} and {X_test.shape[1]}."
-            )
+        # # Ensure X_train and X_test have the same number of columns
+        # if X_train.shape[1] != X_test.shape[1]:
+        #     raise ValueError(
+        #         f"X_train and X_test must have the same number of columns. Got {X_train.shape[1]} and {X_test.shape[1]}."
+        #     )
 
         # Ensure X_train and y_train have the same number of rows
         if X_train.shape[0] != y_train.shape[0]:

@@ -18,8 +18,8 @@ import os
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.ensemble import VotingRegressor
 import pickle
-from numerblox.misc import get_cache_hash, get_sample_weights
-from numerblox.ensemble import GreedyEnsemble
+from .misc import get_sample_weights
+from .ensemble import GreedyEnsemble
 
 
 class MetaEstimator(BaseEstimator, TransformerMixin, MetaEstimatorMixin):
@@ -359,8 +359,7 @@ class MetaModel(BaseEstimator, RegressorMixin):
         if self.weight_factor is not None:
             sample_weights = get_sample_weights(base_models_predictions, wfactor=self.weight_factor, eras=eras)
         else:
-            # Otherwise, use uniform weights
-            sample_weights = pd.Series(1, index=base_models_predictions.index)
+            sample_weights = None
 
         # If ensemble_method is passed as a class, instantiate it
         if isinstance(ensemble_method, type):
