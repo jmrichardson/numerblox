@@ -23,7 +23,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
     def __init__(self, models_attrs, horizon_eras=4, era_column="era", meta=None,
                  era_models_dir='tmp/era_models', final_models_dir='tmp/final_models', artifacts_dir='tmp/artifacts',
-                 expand_train=False):
+                 expand_train=False, evaluate_per_era=False):
         self.models_attrs = models_attrs
         self.horizon_eras = horizon_eras
         self.era_column = era_column
@@ -35,6 +35,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.final_models_dir = final_models_dir
         self.expand_train = expand_train
         self.artifacts_dir = artifacts_dir
+        self.evaluate_per_era = evaluate_per_era
 
         self.latest_trained_model_paths = {}
 
@@ -46,6 +47,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.predictions = None
         self.per_era_numerai_corr = None
         self.meta_weights = {}
+        os.makedirs('tmp/cache', exist_ok=True)
 
     def fit(self, X_train, y_train, X_test, y_test):
         self.validate_arguments(X_train, y_train, X_test, y_test)
@@ -146,6 +148,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 cache_hash = get_cache_hash(cache_id)
                 trained_model_name = f"{model_name}_{test_era}_{cache_hash}"
                 model_path = os.path.join(self.era_models_dir, f"{trained_model_name}.pkl")
+                predictions_path = os.path.join(f"tmp/cache/{trained_model_name}_predictions.pkl")
 
                 if os.path.exists(model_path):
                     print(f"Loading cached model for {model_name} in era {test_era}")
@@ -169,8 +172,17 @@ class WalkForward(BaseEstimator, RegressorMixin):
                     self._save_model(model, trained_model_name)
                     self.latest_trained_model_paths[model_name] = model_path
 
-                test_predictions = pd.Series(model.predict(test_data.drop(columns=[self.era_column])),
-                                             index=test_data.index, name=model_name)
+                # Check for cached predictions
+                if os.path.exists(predictions_path):
+                    print(f"Loading cached predictions for {model_name} in era {test_era}")
+                    with open(predictions_path, 'rb') as f:
+                        test_predictions = pickle.load(f)
+                else:
+                    print(f"Generating new predictions for {model_name} in era {test_era}")
+                    test_predictions = pd.Series(model.predict(test_data.drop(columns=[self.era_column])),
+                                                 index=test_data.index, name=model_name)
+                    with open(predictions_path, 'wb') as f:
+                        pickle.dump(test_predictions, f)
                 combined_predictions[model_name] = test_predictions
 
             combined_predictions = combined_predictions.reindex(test_data.index)
@@ -215,6 +227,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                             cache_hash = get_cache_hash(cache_id)
                             trained_meta_model_name = f"{meta_model_name}_{test_era}_{cache_hash}"
                             model_path = os.path.join(self.era_models_dir, f"{trained_meta_model_name}.pkl")
+                            predictions_path = os.path.join(f"tmp/cache/{trained_meta_model_name}_predictions.pkl")
 
                             if os.path.exists(model_path):
                                 with open(model_path, 'rb') as f:
@@ -234,7 +247,18 @@ class WalkForward(BaseEstimator, RegressorMixin):
                             self.latest_trained_meta_model_paths[window_size] = model_path
                             self.meta_weights[trained_meta_model_name] = meta_model.weights_
 
-                            meta_predictions = meta_model.predict(test_data.drop(columns=[self.era_column]))
+                            # Check for cached meta predictions
+                            if os.path.exists(predictions_path):
+                                print(f"Loading cached meta predictions for {meta_model_name} in era {test_era}")
+                                with open(predictions_path, 'rb') as f:
+                                    meta_predictions = pickle.load(f)
+                            else:
+                                print(f"Generating new meta predictions for {meta_model_name} in era {test_era}")
+                                meta_predictions = meta_model.predict(test_data.drop(columns=[self.era_column]))
+
+                                with open(predictions_path, 'wb') as f:
+                                    pickle.dump(meta_predictions, f)
+
                             combined_predictions[meta_model_name] = meta_predictions
 
                             oof_df = combined_predictions.copy()
@@ -244,10 +268,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
             iteration += 1
 
-            # evaluate up to this point
-            self.oof_data = pd.concat(self.oof_dfs)
-            self.predictions = predictions
-            self.evaluate(X_test, y_test)
+            if self.evaluate_per_era:
+                # evaluate up to this point
+                self.oof_data = pd.concat(self.oof_dfs)
+                self.predictions = predictions
+                self.evaluate(X_test, y_test)
 
         if self.final_models_dir is not None and last_era_with_targets is not None:
             print(f"Saving final models to {self.final_models_dir}")
