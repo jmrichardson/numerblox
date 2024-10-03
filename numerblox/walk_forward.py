@@ -23,7 +23,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
     def __init__(self, models_attrs, horizon_eras=4, era_column="era", meta=None,
                  era_models_dir='tmp/era_models', final_models_dir='tmp/final_models', artifacts_dir='tmp/artifacts',
-                 expand_train=False, evaluate_per_era=False):
+                 expand_train=False, evaluate_per_era=True):
         self.models_attrs = models_attrs
         self.horizon_eras = horizon_eras
         self.era_column = era_column
@@ -93,16 +93,37 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 for model_name, model_attrs in self.models_attrs.items():
                     print(f"Fitting and generating predictions for all base model: {model_name}")
                     model = self._load_model(model_attrs['model_path'])
-                    fit_kwargs = model_attrs.get('fit_kwargs', {}).copy()
-                    sample_weights = fit_kwargs.get('sample_weight', None)
-                    if sample_weights is not None:
-                        era_weights = dict(zip(train_data[self.era_column].unique(), sample_weights))
-                        train_weights = train_data[self.era_column].map(era_weights)
-                        fit_kwargs['sample_weight'] = train_weights.values
-                    fit_kwargs = {k: v for k, v in fit_kwargs.items() if v is not None}
-                    model.fit(train_data.drop(columns=[self.era_column]), train_targets, **fit_kwargs)
+
+                    cache_id = [train_data.shape, sorted(train_data.columns.tolist()), test_era, model_name,
+                                self.horizon_eras, model_attrs]
+                    cache_hash = get_cache_hash(cache_id)
+                    model_path = f"tmp/cache/{model_name}_{cache_hash}.pkl"
+                    predictions_path = f"tmp/cache/{model_name}_{cache_hash}_predictions.pkl"
+                    if os.path.exists(model_path):
+                        print(f"Loading cached base model {model_name}")
+                        with open(model_path, 'rb') as f:
+                            model = pickle.load(f)
+                    else:
+                        fit_kwargs = model_attrs.get('fit_kwargs', {}).copy()
+                        sample_weights = fit_kwargs.get('sample_weight', None)
+                        if sample_weights is not None:
+                            era_weights = dict(zip(train_data[self.era_column].unique(), sample_weights))
+                            train_weights = train_data[self.era_column].map(era_weights)
+                            fit_kwargs['sample_weight'] = train_weights.values
+                        fit_kwargs = {k: v for k, v in fit_kwargs.items() if v is not None}
+                        model.fit(train_data.drop(columns=[self.era_column]), train_targets, **fit_kwargs)
+                        with open(model_path, 'wb') as f:
+                            pickle.dump(model, f)
+
                     test_data_filtered = X_test[X_test[self.era_column].isin(eras_to_test)]
-                    predictions_filtered = model.predict(test_data_filtered.drop(columns=[self.era_column]))
+                    if os.path.exists(predictions_path):
+                        print(f"Loading cached base model predictions {model_name}")
+                        with open(predictions_path, 'rb') as f:
+                            predictions_filtered = pickle.load(f)
+                    else:
+                        predictions_filtered = model.predict(test_data_filtered.drop(columns=[self.era_column]))
+                        with open(predictions_path, 'wb') as f:
+                            pickle.dump(predictions_filtered, f)
                     predictions.loc[test_data_filtered.index, f'{model_name}_base'] = predictions_filtered
 
             if iteration > 0:
