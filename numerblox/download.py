@@ -780,7 +780,7 @@ class SyntheticNumeraiData:
 
         # Generate fictitious predictions if meta is True
         if self.meta:
-            test_data['meta'] = np.random.uniform(0, 1, size=len(test_data))
+            meta = pd.Series(np.random.uniform(0, 1, size=len(test_data)), index=test_data.index)
 
         # Set the last `test_target_era_nans` eras in the test set to have NaN targets
         test_eras = sorted(test_data['era'].unique())
@@ -792,8 +792,13 @@ class SyntheticNumeraiData:
             y_train = train_data['target']
             X_test = test_data.drop(columns=['target'])
             y_test = test_data['target']
-            return X_train, y_train, X_test, y_test
+            if self.meta:
+                return X_train, y_train, X_test, y_test, meta
+            else:
+                return X_train, y_train, X_test, y_test
+
         else:
-            return train_data, test_data
-
-
+            if self.meta:
+                return train_data, test_data, meta
+            else:
+                return train_data, test_data

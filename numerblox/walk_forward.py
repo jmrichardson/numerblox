@@ -23,7 +23,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
     def __init__(self, models_attrs, horizon_eras=4, era_column="era", meta=None,
                  era_models_dir='tmp/era_models', final_models_dir='tmp/final_models', artifacts_dir='tmp/artifacts',
-                 expand_train=False, evaluate_per_era=True):
+                 cache_dir='tmp/cache', expand_train=False, evaluate_per_era=True):
         self.models_attrs = models_attrs
         self.horizon_eras = horizon_eras
         self.era_column = era_column
@@ -35,19 +35,20 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.final_models_dir = final_models_dir
         self.expand_train = expand_train
         self.artifacts_dir = artifacts_dir
+        self.cache_dir = cache_dir
         self.evaluate_per_era = evaluate_per_era
 
         self.latest_trained_model_paths = {}
 
         os.makedirs(self.era_models_dir, exist_ok=True)
-        if self.final_models_dir is not None:
-            os.makedirs(self.final_models_dir, exist_ok=True)
+        os.makedirs(self.final_models_dir, exist_ok=True)
+        os.makedirs(self.cache_dir, exist_ok=True)
+        os.makedirs(self.artifacts_dir, exist_ok=True)
 
         self.evaluation_results = None
         self.predictions = None
         self.per_era_numerai_corr = None
         self.meta_weights = {}
-        os.makedirs('tmp/cache', exist_ok=True)
 
     def fit(self, X_train, y_train, X_test, y_test):
         self.validate_arguments(X_train, y_train, X_test, y_test)
@@ -65,7 +66,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
             X_test = X_test.drop(columns=(['meta']))
         else:
             meta = None
-
 
         eras_to_test = [era for era in eras_test if era >= start_test_era]
 
@@ -97,8 +97,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
                     cache_id = [train_data.shape, sorted(train_data.columns.tolist()), test_era, model_name,
                                 self.horizon_eras, model_attrs]
                     cache_hash = get_cache_hash(cache_id)
-                    model_path = f"tmp/cache/{model_name}_{cache_hash}.pkl"
-                    predictions_path = f"tmp/cache/{model_name}_{cache_hash}_predictions.pkl"
+                    model_path = f"{self.cache_dir}/{model_name}_{cache_hash}.pkl"
+                    predictions_path = f"{self.cache_dir}/{model_name}_{cache_hash}_predictions.pkl"
                     if os.path.exists(model_path):
                         print(f"Loading cached base model {model_name}")
                         with open(model_path, 'rb') as f:
@@ -169,7 +169,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 cache_hash = get_cache_hash(cache_id)
                 trained_model_name = f"{model_name}_{test_era}_{cache_hash}"
                 model_path = os.path.join(self.era_models_dir, f"{trained_model_name}.pkl")
-                predictions_path = os.path.join(f"tmp/cache/{trained_model_name}_predictions.pkl")
+                predictions_path = os.path.join(f"{self.cache_dir}/{trained_model_name}_predictions.pkl")
 
                 if os.path.exists(model_path):
                     print(f"Loading cached model for {model_name} in era {test_era}")
@@ -248,7 +248,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                             cache_hash = get_cache_hash(cache_id)
                             trained_meta_model_name = f"{meta_model_name}_{test_era}_{cache_hash}"
                             model_path = os.path.join(self.era_models_dir, f"{trained_meta_model_name}.pkl")
-                            predictions_path = os.path.join(f"tmp/cache/{trained_meta_model_name}_predictions.pkl")
+                            predictions_path = os.path.join(f"{self.cache_dir}/{trained_meta_model_name}_predictions.pkl")
 
                             if os.path.exists(model_path):
                                 with open(model_path, 'rb') as f:
