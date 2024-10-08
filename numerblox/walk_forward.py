@@ -21,10 +21,10 @@ def _check_sklearn_compatibility(model):
 
 class WalkForward(BaseEstimator, RegressorMixin):
 
-    def __init__(self, models_attrs, horizon_eras=4, era_column="era", meta=None,
+    def __init__(self, models, horizon_eras=4, era_column="era", meta=None,
                  era_models_dir='tmp/era_models', final_models_dir='tmp/final_models', artifacts_dir='tmp/artifacts',
                  cache_dir='tmp/cache', expand_train=False, evaluate_per_era=True):
-        self.models_attrs = models_attrs
+        self.models = models
         self.horizon_eras = horizon_eras
         self.era_column = era_column
         self.oof_predictions = []
@@ -83,21 +83,20 @@ class WalkForward(BaseEstimator, RegressorMixin):
             test_data = X_test[X_test[self.era_column] == test_era]
             test_targets = y_test.loc[test_data.index]
 
-            if not test_targets.notnull().any():
-                print(f"Era {test_era} has no valid targets; skipping.")
-                continue
+            # if not test_targets.notnull().any():
+            #     print(f"Era {test_era} has no valid targets; skipping.")
+            #     continue
 
             last_era_with_targets = test_era
 
             if iteration == 0:
-                for model_name, model_attrs in self.models_attrs.items():
+                for model_name, model_attrs in self.models.items():
                     print(f"Fitting and generating predictions for all base model: {model_name}")
                     model = self._load_model(model_attrs['model_path'])
-
                     cache_id = [train_data.shape, sorted(train_data.columns.tolist()), test_era, model_name,
                                 self.horizon_eras, model_attrs]
                     cache_hash = get_cache_hash(cache_id)
-                    model_path = f"{self.cache_dir}/{model_name}_{cache_hash}.pkl"
+                    model_path = f"{self.cache_dir}/{model_name}_{cache_hash}_model.pkl"
                     predictions_path = f"{self.cache_dir}/{model_name}_{cache_hash}_predictions.pkl"
                     if os.path.exists(model_path):
                         print(f"Loading cached base model {model_name}")
@@ -163,7 +162,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
             print(f"Test era: {test_era}")
             combined_predictions = pd.DataFrame(index=test_data.index)
 
-            for model_name, model_attrs in self.models_attrs.items():
+            for model_name, model_attrs in self.models.items():
                 cache_id = [train_data.shape, sorted(train_data.columns.tolist()), test_era, model_name,
                             self.horizon_eras, model_attrs]
                 cache_hash = get_cache_hash(cache_id)
@@ -208,7 +207,12 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
             combined_predictions = combined_predictions.reindex(test_data.index)
             oof_df = combined_predictions.copy()
-            oof_df['target'] = test_targets
+
+            if isinstance(test_targets, pd.DataFrame):
+                oof_df['target'] = test_targets['target_cyrusd_20'].squeeze()
+            else:
+                oof_df['target'] = test_targets.squeeze()
+
             oof_df['era'] = test_data[self.era_column]
             self.oof_dfs.append(oof_df)
 
@@ -217,7 +221,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 last_target_era = test_era - self.horizon_eras - 1
                 available_eras = [era for era in self.oof_data['era'].unique() if era <= last_target_era]
                 for window_size in self.meta.meta_eras:
-                    if len(available_eras) >= window_size and len(self.models_attrs) > 1:
+                    if len(available_eras) >= window_size and len(self.models) > 1:
                         window_eras = available_eras[-window_size:]
                         print(f"Meta model window size: {window_size}")
                         if len(window_eras) == 1:
@@ -244,7 +248,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
                             meta_model = clone(self.meta)
                             meta_model_name = f"meta_model_{window_size}"
-                            cache_id = [train_data.shape, sorted(train_data.columns.tolist()), window_eras, window_size, test_era, self.horizon_eras, self.models_attrs]
+                            cache_id = [train_data.shape, sorted(train_data.columns.tolist()), window_eras, window_size, test_era, self.horizon_eras, self.models]
                             cache_hash = get_cache_hash(cache_id)
                             trained_meta_model_name = f"{meta_model_name}_{test_era}_{cache_hash}"
                             model_path = os.path.join(self.era_models_dir, f"{trained_meta_model_name}.pkl")
@@ -298,7 +302,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
         if self.final_models_dir is not None and last_era_with_targets is not None:
             print(f"Saving final models to {self.final_models_dir}")
             # Save the latest retrained base models
-            for model_name, model_attrs in self.models_attrs.items():
+            for model_name, model_attrs in self.models.items():
                 model_path = self.latest_trained_model_paths.get(model_name)
                 if model_path:
                     model = self._load_model(model_path)
@@ -381,7 +385,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
             # Combine all prediction columns (including base) with era and target
             all_predictions_with_era_target = pd.concat([self.predictions, self.oof_data], axis=1)
             all_predictions_with_era_target[self.era_column] = X.loc[oof_index, self.era_column]
-            all_predictions_with_era_target['target'] = y.loc[oof_index]
 
             # Reorder columns to place 'era' first
             columns_order = [self.era_column] + [col for col in all_predictions_with_era_target.columns if
@@ -402,7 +405,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
     def _load_model(self, path):
         with open(path, 'rb') as f:
             model = pickle.load(f)
-        _check_sklearn_compatibility(model)
         return model
 
     def _save_model(self, model, model_name, is_final=False):
@@ -417,18 +419,18 @@ class WalkForward(BaseEstimator, RegressorMixin):
             raise TypeError(f"X_train must be a pandas DataFrame, got {type(X_train)} instead.")
         if not isinstance(X_test, pd.DataFrame):
             raise TypeError(f"X_test must be a pandas DataFrame, got {type(X_test)} instead.")
-        if not isinstance(y_train, pd.Series):
-            raise TypeError(f"y_train must be a pandas Series, got {type(y_train)} instead.")
-        if not isinstance(y_test, pd.Series):
-            raise TypeError(f"y_test must be a pandas Series, got {type(y_test)} instead.")
+        # if not isinstance(y_train, pd.Series):
+            # raise TypeError(f"y_train must be a pandas Series, got {type(y_train)} instead.")
+        # if not isinstance(y_test, pd.Series):
+            # raise TypeError(f"y_test must be a pandas Series, got {type(y_test)} instead.")
 
         # Ensure y_train has no None values
-        if y_train.isnull().any():
-            raise ValueError("y_train contains None values, it must not have any.")
+        # if y_train.isnull().any():
+            # raise ValueError("y_train contains None values, it must not have any.")
 
         # Ensure y_test has at least one non-None value
-        if y_test.isnull().all():
-            raise ValueError("y_test contains only None values.")
+        # if y_test.isnull().all():
+            # raise ValueError("y_test contains only None values.")
 
         # # Ensure X_train and X_test have the same number of columns
         # if X_train.shape[1] != X_test.shape[1]:
@@ -453,8 +455,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
         if self.era_column not in X_test.columns:
             raise ValueError(f"era_column '{self.era_column}' not found in X_test columns.")
 
-        if not self.models_attrs or len(self.models_attrs) == 0:
-            raise ValueError("No models provided. Please check models_attrs.")
+        if not self.models or len(self.models) == 0:
+            raise ValueError("No models provided. Please check models.")
 
         if not isinstance(self.horizon_eras, int) or self.horizon_eras <= 0:
             raise ValueError(f"horizon_eras must be a positive integer, got {self.horizon_eras}.")
@@ -482,7 +484,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
             raise ValueError("Both training and testing data must contain at least one era.")
 
         # Check that sample weights (if provided) are identical within each era
-        for model_name, model_attrs in self.models_attrs.items():
+        for model_name, model_attrs in self.models.items():
             sample_weights = model_attrs.get('fit_kwargs', {}).get('sample_weight', None)
 
             if sample_weights is not None:
@@ -508,7 +510,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
         # If expand_train is True, ensure no sample weights are provided
         if self.expand_train:
-            for model_name, model_attrs in self.models_attrs.items():
+            for model_name, model_attrs in self.models.items():
                 sample_weights = model_attrs.get('fit_kwargs', {}).get('sample_weight', None)
                 if sample_weights is not None:
                     raise ValueError(
