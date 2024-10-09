@@ -248,7 +248,9 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
                             meta_model = clone(self.meta)
                             meta_model_name = f"meta_model_{window_size}"
-                            cache_id = [train_data.shape, sorted(train_data.columns.tolist()), window_eras, window_size, test_era, self.horizon_eras, self.models]
+                            cache_id = [train_data.shape, sorted(train_data.columns.tolist()), window_eras, window_size,
+                                        test_era, self.horizon_eras, self.models,
+                                        meta_model.meta_eras, meta_model.max_ensemble_size, meta_model.weight_factor]
                             cache_hash = get_cache_hash(cache_id)
                             trained_meta_model_name = f"{meta_model_name}_{test_era}_{cache_hash}"
                             model_path = os.path.join(self.era_models_dir, f"{trained_meta_model_name}.pkl")
