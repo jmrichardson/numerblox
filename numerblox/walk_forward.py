@@ -50,7 +50,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.per_era_numerai_corr = None
         self.meta_weights = {}
 
-    def fit(self, X_train, y_train, X_test, y_test):
+    def fit(self, X_train, y_train, X_test, y_test, meta_data=None):
         self.validate_arguments(X_train, y_train, X_test, y_test)
 
         X_train[self.era_column] = X_train[self.era_column].astype(int)
