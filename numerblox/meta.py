@@ -325,35 +325,6 @@ class MetaModel(BaseEstimator, RegressorMixin):
             y: pd.Series,
             ensemble_method=GreedyEnsemble,
     ) -> 'MetaModel':
-        """
-        Fit the meta-model by selecting base models and creating an ensemble.
-
-        This method selects the best base models using the specified ensemble method (default is GreedyEnsemble),
-        optionally applying sample weights based on the provided `weight_factor` and `eras`. It then constructs
-        a weighted VotingRegressor as the final ensemble model.
-
-        Parameters:
-        -----------
-        base_models_predictions : pd.DataFrame
-            Predictions from base models for each sample.
-        true_targets : pd.Series
-            The true target values corresponding to the predictions.
-        eras : pd.Series
-            Era information used to assign weights to the samples if `weight_factor` is specified.
-        model_name_to_path : dict
-            A mapping from model names to file paths where the models are stored.
-        X : pd.DataFrame
-            The input data used for fitting the final ensemble model.
-        y : pd.Series
-            The true target values used for fitting the final ensemble model.
-        ensemble_method : object, optional (default=GreedyEnsemble)
-            The method used to select models for the ensemble. Must implement a `fit` method.
-
-        Returns:
-        --------
-        MetaModel
-            The fitted meta-model instance.
-        """
 
         # If weight_factor is provided, calculate sample weights based on eras
         if self.weight_factor is not None:
@@ -388,31 +359,22 @@ class MetaModel(BaseEstimator, RegressorMixin):
         # Prepare the final VotingRegressor ensemble model
         weights_list = []
         estimators_list = []
+        models = []
         for model_name, model in self.selected_models:
             weight = self.weights_.loc[model_name]  # Get the weight for the model
             weights_list.append(weight)  # Add the weight to the list
             estimators_list.append((model_name, model))  # Add the model and its name to the list
+            models.append(model)
 
         # Create the VotingRegressor with the selected models and their corresponding weights
+
         self.ensemble_model = VotingRegressor(estimators=estimators_list, weights=weights_list)
-        self.ensemble_model.fit(X, y)  # Perform a dummy fit on the final ensemble model
+        self.ensemble_model.estimators_ = models
+        # self.ensemble_model.fit(X, y)  # Dont need a dummy fit because of estimators_ above
 
         return self  # Return the fitted meta-model instance
 
     def predict(self, X: pd.DataFrame) -> pd.Series:
-        """
-        Predict using the ensemble model.
-
-        Parameters:
-        -----------
-        X : pd.DataFrame
-            The input data for making predictions.
-
-        Returns:
-        --------
-        pd.Series
-            Predictions for each sample in the input data.
-        """
         # Use the ensemble model to predict and return the results as a pandas Series
         results = pd.Series(self.ensemble_model.predict(X), index=X.index)
         return results

@@ -265,7 +265,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                                     base_models_predictions,
                                     combined_df['target'],
                                     combined_df['era'],
-                                    model_name_to_path, train_data.drop(columns=[self.era_column]), train_targets)
+                                    model_name_to_path, train_data.drop(columns=[self.era_column]), train_targets['target_cyrusd_20'].squeeze())
                                 with open(model_path, 'wb') as f:
                                     pickle.dump(meta_model, f)
 
@@ -287,7 +287,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                             combined_predictions[meta_model_name] = meta_predictions
 
                             oof_df = combined_predictions.copy()
-                            oof_df['target'] = test_targets
+                            oof_df['target'] = test_targets['target_cyrusd_20'].squeeze()
                             oof_df['era'] = test_data[self.era_column]
                             self.oof_dfs[-1] = oof_df
 
