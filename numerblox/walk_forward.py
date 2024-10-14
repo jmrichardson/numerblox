@@ -77,7 +77,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.latest_trained_model_paths = {}
         self.latest_trained_meta_model_paths = {}
         self.meta_weights = {}
-        self.oof_data = None
+        oof_pre = []
 
         for test_era in tqdm(eras_to_test, desc="Processing eras"):
             test_data = X_test[X_test[self.era_column] == test_era]
@@ -124,6 +124,16 @@ class WalkForward(BaseEstimator, RegressorMixin):
                         with open(predictions_path, 'wb') as f:
                             pickle.dump(predictions_filtered, f)
                     predictions.loc[test_data_filtered.index, f'{model_name}_base'] = predictions_filtered
+                    if hasattr(model, "oof"):
+                        df = model.oof.copy()
+                        df.rename(columns={"predict": f"{model_name}"}, inplace=True)
+                        oof_pre.append(df)
+
+                if oof_pre:
+                    common_cols = oof_pre[0][['era', 'target']]
+                    specific_cols = [df.drop(['era', 'target', 'group'], axis=1) for df in oof_pre]
+                    concatenated_specific_cols = pd.concat(specific_cols, axis=1)
+                    oof_pre = pd.concat([common_cols, concatenated_specific_cols], axis=1)
 
             if iteration > 0:
                 if not self.expand_train:
@@ -219,7 +229,12 @@ class WalkForward(BaseEstimator, RegressorMixin):
             if self.meta is not None:
                 self.oof_data = pd.concat(self.oof_dfs)
                 last_target_era = test_era - self.horizon_eras - 1
-                available_eras = [era for era in self.oof_data['era'].unique() if era <= last_target_era]
+                if len(oof_pre) > 0:
+                    oof_all = pd.concat([oof_pre, self.oof_data])
+                    available_eras = [era for era in oof_all['era'].unique() if era <= last_target_era]
+                else:
+                    oof_all = self.oof_data.copy()
+                    available_eras = [era for era in self.oof_data['era'].unique() if era <= last_target_era]
                 for window_size in self.meta.meta_eras:
                     if len(available_eras) >= window_size and len(self.models) > 1:
                         window_eras = available_eras[-window_size:]
@@ -231,17 +246,15 @@ class WalkForward(BaseEstimator, RegressorMixin):
                             print(f"Meta model window size: {window_size}, Eras: {min(window_eras)} - {max(window_eras)}")
                         print(f"Test era: {test_era}")
 
-                        window_oof_data = self.oof_data[self.oof_data['era'].isin(window_eras)]
+                        window_oof_data = oof_all[oof_all['era'].isin(window_eras)]
 
-                        base_model_names = [col for col in window_oof_data.columns if
-                                              col not in ['target', 'era'] and not col.startswith('meta_model')]
+                        base_model_names = [col for col in window_oof_data.columns if col not in ['target', 'era'] and not col.startswith('meta_model')]
                         base_models_predictions = window_oof_data[base_model_names]
                         true_targets = window_oof_data['target']
                         eras_series = window_oof_data['era']
 
                         if true_targets.notnull().any():
-                            model_name_to_path = {col: self.latest_trained_model_paths.get(col)
-                                                  for col in base_model_names}
+                            model_name_to_path = {col: self.latest_trained_model_paths.get(col) for col in base_model_names}
                             for col, model_path in model_name_to_path.items():
                                 if not model_path:
                                     raise ValueError(f"No trained model path found for base model {col}")

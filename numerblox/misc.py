@@ -139,7 +139,11 @@ def get_sample_weights(data, wfactor=.2, eras=None):
     return data_copy['sample_weight']
 
 
-def numerai_corr_weighted(targets: pd.Series, predictions: pd.Series, sample_weight: pd.Series = None) -> float:
+def numerai_corr_weighted(targets: pd.Series, predictions: pd.Series, eras: pd.Series = None, sample_weight: pd.Series = None) -> float:
+    # Align eras with the predictions' index if eras are provided
+    if eras is not None:
+        eras = eras.reindex(predictions.index)
+
     # Rank and gaussianize predictions
     ranked_preds = predictions.fillna(0.5).rank(pct=True, method='average')
     gauss_ranked_preds = stats.norm.ppf(ranked_preds)
@@ -163,36 +167,56 @@ def numerai_corr_weighted(targets: pd.Series, predictions: pd.Series, sample_wei
     valid_mask = np.isfinite(weighted_preds) & np.isfinite(weighted_target)
     weighted_preds = weighted_preds[valid_mask]
     weighted_target = weighted_target[valid_mask]
+    valid_eras = eras[valid_mask] if eras is not None else None
 
-    # Check if we still have enough valid data points to compute correlation
-    if len(weighted_preds) < 2:
-        return np.nan  # Not enough data to compute correlation
+    # Initialize correlation result as NaN
+    corr_result = np.nan
 
-    # Pearson correlation
-    corr, _ = stats.pearsonr(weighted_preds, weighted_target)
+    # Group by eras and calculate correlation for each era
+    if valid_eras is not None:
+        correlations = []
+        unique_eras = valid_eras.unique()
+        for era in unique_eras:
+            era_mask = valid_eras == era
+            if era_mask.sum() >= 2:  # Ensure there are enough data points in the era
+                era_corr, _ = stats.pearsonr(weighted_preds[era_mask], weighted_target[era_mask])
+                correlations.append(era_corr)
 
-    # Return negative correlation as loss (since lower is better)
-    return corr
+        # If valid correlations are available, calculate the mean correlation
+        if correlations:
+            corr_result = np.mean(correlations)
+
+    # If no eras provided, calculate overall correlation
+    elif len(weighted_preds) >= 2:
+        corr_result, _ = stats.pearsonr(weighted_preds, weighted_target)
+
+    # Return the final correlation result
+    return corr_result
 
 
 def mmc_weighted(
+    targets: pd.Series,
     predictions: pd.Series,
     meta_model: pd.Series,
-    targets: pd.Series,
+    eras: pd.Series = None,
     sample_weight: pd.Series = None,
 ) -> float:
 
     DEFAULT_MAX_FILTERED_INDEX_RATIO = 0.2
 
+    # Align eras with the predictions' index if eras are provided
+    if eras is not None:
+        eras = eras.reindex(predictions.index)
+
     # Step 1: Filter and sort indices to match
     ids = meta_model.dropna().index.intersection(predictions.dropna().index)
     assert len(ids) / len(meta_model) >= (1 - DEFAULT_MAX_FILTERED_INDEX_RATIO), (
         "meta_model does not have enough overlapping ids with predictions,"
-        f" must have >= {round(1 - DEFAULT_MAX_FILTERED_INDEX_RATIO,2)*100}% overlapping ids"
+        f" must have >= {round(1 - DEFAULT_MAX_FILTERED_INDEX_RATIO, 2) * 100}% overlapping ids"
     )
     assert len(ids) / len(predictions) >= (1 - DEFAULT_MAX_FILTERED_INDEX_RATIO), (
         "predictions do not have enough overlapping ids with meta_model,"
-        f" must have >= {round(1 - DEFAULT_MAX_FILTERED_INDEX_RATIO,2)*100}% overlapping ids"
+        f" must have >= {round(1 - DEFAULT_MAX_FILTERED_INDEX_RATIO, 2) * 100}% overlapping ids"
     )
     meta_model = meta_model.loc[ids].sort_index()
     predictions = predictions.loc[ids].sort_index()
@@ -200,7 +224,7 @@ def mmc_weighted(
     ids = targets.dropna().index.intersection(predictions.index)
     assert len(ids) / len(targets) >= (1 - DEFAULT_MAX_FILTERED_INDEX_RATIO), (
         "targets do not have enough overlapping ids with predictions,"
-        f" must have >= {round(1 - DEFAULT_MAX_FILTERED_INDEX_RATIO,2)*100}% overlapping ids"
+        f" must have >= {round(1 - DEFAULT_MAX_FILTERED_INDEX_RATIO, 2) * 100}% overlapping ids"
     )
     targets = targets.loc[ids].sort_index()
     predictions = predictions.loc[ids].sort_index()
@@ -238,12 +262,31 @@ def mmc_weighted(
     targets_arr = targets.values
 
     # Step 5: Compute MMC
-    if sample_weight is not None:
-        sample_weight_arr = sample_weight.values
-        numerator = np.sum(sample_weight_arr * targets_arr * neutral_preds)
-        denominator = np.sum(sample_weight_arr)
-        mmc_score = numerator / denominator
+    mmc_score = np.nan
+    if eras is not None:
+        mmc_scores = []
+        unique_eras = eras.unique()
+        for era in unique_eras:
+            era_mask = eras == era
+
+            if sample_weight is not None:
+                sample_weight_arr = sample_weight.values[era_mask]
+                numerator = np.sum(sample_weight_arr * targets_arr[era_mask] * neutral_preds[era_mask])
+                denominator = np.sum(sample_weight_arr)
+                mmc_scores.append(numerator / denominator)
+            else:
+                mmc_scores.append(np.dot(targets_arr[era_mask], neutral_preds[era_mask]) / len(targets_arr[era_mask]))
+
+        if mmc_scores:
+            mmc_score = np.mean(mmc_scores)
+
     else:
-        mmc_score = np.dot(targets_arr, neutral_preds) / len(targets_arr)
+        if sample_weight is not None:
+            sample_weight_arr = sample_weight.values
+            numerator = np.sum(sample_weight_arr * targets_arr * neutral_preds)
+            denominator = np.sum(sample_weight_arr)
+            mmc_score = numerator / denominator
+        else:
+            mmc_score = np.dot(targets_arr, neutral_preds) / len(targets_arr)
 
     return mmc_score
