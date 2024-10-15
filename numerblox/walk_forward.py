@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import base64
 from io import BytesIO
+import re
 
 
 def _check_sklearn_compatibility(model):
@@ -124,6 +125,12 @@ class WalkForward(BaseEstimator, RegressorMixin):
                         with open(predictions_path, 'wb') as f:
                             pickle.dump(predictions_filtered, f)
                     predictions.loc[test_data_filtered.index, f'{model_name}_base'] = predictions_filtered
+
+                    if hasattr(model, "target"):
+                        horizon = int(int(re.search(r'_(\d+)$', model.target).group(1)) / 5)
+                        if self.horizon_eras < horizon:
+                            raise Exception(f"Model target {model.target} larger than horizon eras: {self.horizon_eras}")
+
                     if hasattr(model, "oof"):
                         df = model.oof.copy()
                         df.rename(columns={"predict": f"{model_name}"}, inplace=True)
