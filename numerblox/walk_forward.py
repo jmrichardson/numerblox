@@ -243,7 +243,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
                     oof_all = self.oof_data.copy()
                     available_eras = [era for era in self.oof_data['era'].unique() if era <= last_target_era]
                 for window_size in self.meta.meta_eras:
-                    if len(available_eras) >= window_size and len(self.models) > 1:
+                    if len(available_eras) >= 1 and len(self.models) > 1:
+                    # if len(available_eras) >= window_size and len(self.models) > 1:
                         window_eras = available_eras[-window_size:]
                         print(f"Meta model window size: {window_size}")
                         if len(window_eras) == 1:
