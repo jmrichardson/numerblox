@@ -140,7 +140,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
                     common_cols = oof_pre[0][['era', 'target']]
                     specific_cols = [df.drop(['era', 'target', 'group'], axis=1) for df in oof_pre]
                     concatenated_specific_cols = pd.concat(specific_cols, axis=1)
-                    oof_pre = pd.concat([common_cols, concatenated_specific_cols], axis=1)
+                    oof_pre = pd.concat([common_cols, concatenated_specific_cols], axis=1).dropna()
+                    oof_pre['era'] = oof_pre.era.astype(int)
 
             if iteration > 0:
                 if not self.expand_train:
@@ -237,7 +238,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 self.oof_data = pd.concat(self.oof_dfs)
                 last_target_era = test_era - self.horizon_eras - 1
                 if len(oof_pre) > 0:
-                    oof_all = pd.concat([oof_pre, self.oof_data])
+                    oof_all = self.oof_data.combine_first(oof_pre)
+                    oof_all = oof_all.sort_values(by='era', ascending=True)
                     available_eras = [era for era in oof_all['era'].unique() if era <= last_target_era]
                 else:
                     oof_all = self.oof_data.copy()
