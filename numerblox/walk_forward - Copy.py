@@ -22,11 +22,11 @@ def _check_sklearn_compatibility(model):
 
 class WalkForward(BaseEstimator, RegressorMixin):
 
-    def __init__(self, models, purge_eras=4, era_column="era", meta=None,
+    def __init__(self, models, horizon_eras=4, era_column="era", meta=None,
                  era_models_dir='tmp/era_models', final_models_dir='tmp/final_models', artifacts_dir='tmp/artifacts',
-                 cache_dir='tmp/cache', expand_train=False, evaluate_per_era=True, step_eras=1):
+                 cache_dir='tmp/cache', expand_train=False, evaluate_per_era=True):
         self.models = models
-        self.purge_eras = purge_eras
+        self.horizon_eras = horizon_eras
         self.era_column = era_column
         self.oof_predictions = []
         self.oof_targets = []
@@ -38,7 +38,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.artifacts_dir = artifacts_dir
         self.cache_dir = cache_dir
         self.evaluate_per_era = evaluate_per_era
-        self.step_eras = step_eras
 
         self.latest_trained_model_paths = {}
 
@@ -62,7 +61,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
         X_test = X_test.sort_values(by=self.era_column).copy()
         y_test = y_test.loc[X_test.index].copy()
         eras_test = sorted(X_test[self.era_column].unique())
-        start_test_era = min(eras_test) + self.purge_eras
+        start_test_era = min(eras_test) + self.horizon_eras
         if "meta" in X_test:
             meta = X_test['meta']
             X_test = X_test.drop(columns=(['meta']))
@@ -81,20 +80,22 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.meta_weights = {}
         oof_pre = []
 
-        i = 0
-        num_eras_to_test = len(eras_to_test)
-        while i < num_eras_to_test:
-            eras_batch = eras_to_test[i:i + self.step_eras]
+        for test_era in tqdm(eras_to_test, desc="Processing eras"):
+            test_data = X_test[X_test[self.era_column] == test_era]
+            test_targets = y_test.loc[test_data.index]
 
-            test_data_batch = X_test[X_test[self.era_column].isin(eras_batch)]
-            test_targets_batch = y_test.loc[test_data_batch.index]
+            # if not test_targets.notnull().any():
+            #     print(f"Era {test_era} has no valid targets; skipping.")
+            #     continue
+
+            last_era_with_targets = test_era
 
             if iteration == 0:
                 for model_name, model_attrs in self.models.items():
-                    print(f"Fitting and generating predictions for base model: {model_name}")
+                    print(f"Fitting and generating predictions for all base model: {model_name}")
                     model = self._load_model(model_attrs['model_path'])
-                    cache_id = [train_data.shape, sorted(train_data.columns.tolist()), model_name,
-                                self.purge_eras, model_attrs]
+                    cache_id = [train_data.shape, sorted(train_data.columns.tolist()), test_era, model_name,
+                                self.horizon_eras, model_attrs]
                     cache_hash = get_cache_hash(cache_id)
                     model_path = f"{self.cache_dir}/{model_name}_{cache_hash}_model.pkl"
                     predictions_path = f"{self.cache_dir}/{model_name}_{cache_hash}_predictions.pkl"
@@ -127,8 +128,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
                     if hasattr(model, "target"):
                         horizon = int(int(re.search(r'_(\d+)$', model.target).group(1)) / 5)
-                        if self.purge_eras < horizon:
-                            raise Exception(f"Model target {model.target} larger than purge eras: {self.purge_eras}")
+                        if self.horizon_eras < horizon:
+                            raise Exception(f"Model target {model.target} larger than horizon eras: {self.horizon_eras}")
 
                     if hasattr(model, "oof"):
                         df = model.oof.copy()
@@ -142,186 +143,190 @@ class WalkForward(BaseEstimator, RegressorMixin):
                     oof_pre = pd.concat([common_cols, concatenated_specific_cols], axis=1).dropna()
                     oof_pre['era'] = oof_pre.era.astype(int)
 
-                combined_predictions = predictions.loc[test_data_batch.index]
-                oof_df = combined_predictions.copy()
-
-                if isinstance(test_targets_batch, pd.DataFrame):
-                    oof_df['target'] = test_targets_batch['target_cyrusd_20'].squeeze()
-                else:
-                    oof_df['target'] = test_targets_batch.squeeze()
-
-                oof_df['era'] = test_data_batch[self.era_column]
-                self.oof_dfs.append(oof_df)
-
-            else:
+            if iteration > 0:
                 if not self.expand_train:
-                    oldest_eras = sorted(train_data[self.era_column].unique())[:self.step_eras]
-                    train_data = train_data[~train_data[self.era_column].isin(oldest_eras)]
+                    oldest_era = train_data[self.era_column].min()
+                    train_data = train_data[train_data[self.era_column] != oldest_era]
                     train_targets = train_targets.loc[train_data.index]
 
                 last_train_era = train_data[self.era_column].max()
-                next_train_eras = range(last_train_era + 1, last_train_era + 1 + self.step_eras)
+                next_train_era = last_train_era + 1
 
-                new_train_data = pd.DataFrame()
-                new_train_targets = pd.Series()
-
-                for next_train_era in next_train_eras:
-                    if next_train_era in X_train[self.era_column].unique():
-                        era_data = X_train[X_train[self.era_column] == next_train_era]
-                        era_targets = y_train.loc[era_data.index]
-                    elif next_train_era in X_test[self.era_column].unique():
-                        era_data = X_test[X_test[self.era_column] == next_train_era]
-                        era_targets = y_test.loc[era_data.index]
-                    else:
-                        continue
-
-                    new_train_data = pd.concat([new_train_data, era_data])
-                    new_train_targets = pd.concat([new_train_targets, era_targets])
+                if next_train_era in X_train[self.era_column].unique():
+                    new_train_data = X_train[X_train[self.era_column] == next_train_era]
+                    new_train_targets = y_train.loc[new_train_data.index]
+                elif next_train_era in X_test[self.era_column].unique():
+                    new_train_data = X_test[X_test[self.era_column] == next_train_era]
+                    new_train_targets = y_test.loc[new_train_data.index]
+                else:
+                    new_train_data = pd.DataFrame()
+                    new_train_targets = pd.Series()
 
                 if not new_train_data.empty:
                     train_data = pd.concat([train_data, new_train_data])
                     train_targets = pd.concat([train_targets, new_train_targets])
 
-                combined_predictions = pd.DataFrame(index=test_data_batch.index)
+            last_train_era = train_data[self.era_column].max()
+            gap = test_era - last_train_era
 
-                for model_name, model_attrs in self.models.items():
-                    cache_id = [train_data.shape, sorted(train_data.columns.tolist()), model_name, self.purge_eras, model_attrs]
-                    cache_hash = get_cache_hash(cache_id)
-                    trained_model_name = f"{model_name}_{eras_batch[-1]}_{cache_hash}"
-                    model_path = os.path.join(self.era_models_dir, f"{trained_model_name}.pkl")
-                    predictions_path = os.path.join(f"{self.cache_dir}/{trained_model_name}_predictions.pkl")
+            if gap <= self.horizon_eras:
+                raise ValueError(
+                    f"Gap between last training era ({last_train_era}) and test era ({test_era}) is {gap}, expected > {self.horizon_eras}")
 
-                    if os.path.exists(model_path):
-                        print(f"Loading cached model for {model_name} in eras {eras_batch}")
-                        with open(model_path, 'rb') as f:
-                            model = pickle.load(f)
-                        self.latest_trained_model_paths[model_name] = model_path
-                    else:
-                        print(f"Training new model {model_name} for test eras {eras_batch}")
-                        model = self._load_model(model_attrs['model_path'])
-                        fit_kwargs = model_attrs.get('fit_kwargs', {}).copy()
+            print(f"Iteration {iteration + 1}")
+            train_eras_unique = train_data[self.era_column].unique()
+            print(
+                f"Train eras: {train_eras_unique.min()} - {train_eras_unique.max()} ({len(train_eras_unique)} eras)")
+            print(f"Test era: {test_era}")
+            combined_predictions = pd.DataFrame(index=test_data.index)
 
-                        sample_weights = fit_kwargs.get('sample_weight', None)
-                        if sample_weights is not None:
-                            era_weights = dict(zip(train_data[self.era_column].unique(), sample_weights))
-                            train_weights = train_data[self.era_column].map(era_weights)
-                            fit_kwargs['sample_weight'] = train_weights.values
+            for model_name, model_attrs in self.models.items():
+                cache_id = [train_data.shape, sorted(train_data.columns.tolist()), test_era, model_name,
+                            self.horizon_eras, model_attrs]
+                cache_hash = get_cache_hash(cache_id)
+                trained_model_name = f"{model_name}_{test_era}_{cache_hash}"
+                model_path = os.path.join(self.era_models_dir, f"{trained_model_name}.pkl")
+                predictions_path = os.path.join(f"{self.cache_dir}/{trained_model_name}_predictions.pkl")
 
-                        fit_kwargs = {k: v for k, v in fit_kwargs.items() if v is not None}
-
-                        model.fit(train_data.drop(columns=[self.era_column]), train_targets, **fit_kwargs)
-                        self._save_model(model, trained_model_name)
-                        self.latest_trained_model_paths[model_name] = model_path
-
-                    if os.path.exists(predictions_path):
-                        print(f"Loading cached predictions for {model_name} in eras {eras_batch}")
-                        with open(predictions_path, 'rb') as f:
-                            test_predictions = pickle.load(f)
-                    else:
-                        print(f"Generating new predictions for {model_name} in eras {eras_batch}")
-                        test_predictions = pd.Series(model.predict(test_data_batch.drop(columns=[self.era_column])), index=test_data_batch.index, name=model_name)
-                        with open(predictions_path, 'wb') as f:
-                            pickle.dump(test_predictions, f)
-                    combined_predictions[model_name] = test_predictions
-
-                combined_predictions = combined_predictions.reindex(test_data_batch.index)
-                oof_df = combined_predictions.copy()
-                if isinstance(test_targets_batch, pd.DataFrame):
-                    oof_df['target'] = test_targets_batch['target_cyrusd_20'].squeeze()
+                if os.path.exists(model_path):
+                    print(f"Loading cached model for {model_name} in era {test_era}")
+                    with open(model_path, 'rb') as f:
+                        model = pickle.load(f)
+                    self.latest_trained_model_paths[model_name] = model_path
                 else:
-                    oof_df['target'] = test_targets_batch.squeeze()
-                oof_df['era'] = test_data_batch[self.era_column]
-                self.oof_dfs.append(oof_df)
+                    print(f"Training new model {model_name} for test era {test_era}")
+                    model = self._load_model(model_attrs['model_path'])
+                    fit_kwargs = model_attrs.get('fit_kwargs', {}).copy()
 
-                if self.meta is not None:
-                    self.oof_data = pd.concat(self.oof_dfs)
-                    last_target_era = eras_batch[-1] - self.purge_eras - 1
-                    if len(oof_pre) > 0:
-                        oof_all = self.oof_data.combine_first(oof_pre)
-                        oof_all = oof_all.sort_values(by='era', ascending=True)
-                        available_eras = [era for era in oof_all['era'].unique() if era <= last_target_era]
-                    else:
-                        oof_all = self.oof_data.copy()
-                        available_eras = [era for era in self.oof_data['era'].unique() if era <= last_target_era]
-                    for window_size in self.meta.meta_eras:
-                        if len(available_eras) >= 1 and len(self.models) > 1:
-                            window_eras = available_eras[-window_size:]
-                            print(f"Meta model window size: {window_size}")
-                            if len(window_eras) == 1:
-                                print(f"Meta model window era: {window_eras[0]}")
+                    sample_weights = fit_kwargs.get('sample_weight', None)
+                    if sample_weights is not None:
+                        era_weights = dict(zip(train_data[self.era_column].unique(), sample_weights))
+                        train_weights = train_data[self.era_column].map(era_weights)
+                        fit_kwargs['sample_weight'] = train_weights.values
+
+                    fit_kwargs = {k: v for k, v in fit_kwargs.items() if v is not None}
+
+                    model.fit(train_data.drop(columns=[self.era_column]), train_targets, **fit_kwargs)
+                    self._save_model(model, trained_model_name)
+                    self.latest_trained_model_paths[model_name] = model_path
+
+                # Check for cached predictions
+                if os.path.exists(predictions_path):
+                    print(f"Loading cached predictions for {model_name} in era {test_era}")
+                    with open(predictions_path, 'rb') as f:
+                        test_predictions = pickle.load(f)
+                else:
+                    print(f"Generating new predictions for {model_name} in era {test_era}")
+                    test_predictions = pd.Series(model.predict(test_data.drop(columns=[self.era_column])),
+                                                 index=test_data.index, name=model_name)
+                    with open(predictions_path, 'wb') as f:
+                        pickle.dump(test_predictions, f)
+                combined_predictions[model_name] = test_predictions
+
+            combined_predictions = combined_predictions.reindex(test_data.index)
+            oof_df = combined_predictions.copy()
+
+            if isinstance(test_targets, pd.DataFrame):
+                oof_df['target'] = test_targets['target_cyrusd_20'].squeeze()
+            else:
+                oof_df['target'] = test_targets.squeeze()
+
+            oof_df['era'] = test_data[self.era_column]
+            self.oof_dfs.append(oof_df)
+
+            if self.meta is not None:
+                self.oof_data = pd.concat(self.oof_dfs)
+                last_target_era = test_era - self.horizon_eras - 1
+                if len(oof_pre) > 0:
+                    oof_all = self.oof_data.combine_first(oof_pre)
+                    oof_all = oof_all.sort_values(by='era', ascending=True)
+                    available_eras = [era for era in oof_all['era'].unique() if era <= last_target_era]
+                else:
+                    oof_all = self.oof_data.copy()
+                    available_eras = [era for era in self.oof_data['era'].unique() if era <= last_target_era]
+                for window_size in self.meta.meta_eras:
+                    if len(available_eras) >= 1 and len(self.models) > 1:
+                    # if len(available_eras) >= window_size and len(self.models) > 1:
+                        window_eras = available_eras[-window_size:]
+                        print(f"Meta model window size: {window_size}")
+                        if len(window_eras) == 1:
+                            print(f"Meta model window size: {window_size}, Era:  {window_eras[0]}")
+                            print(f"Meta model window era: {window_eras[0]}")
+                        else:
+                            print(f"Meta model window size: {window_size}, Eras: {min(window_eras)} - {max(window_eras)}")
+                        print(f"Test era: {test_era}")
+
+                        window_oof_data = oof_all[oof_all['era'].isin(window_eras)]
+
+                        base_model_names = [col for col in window_oof_data.columns if col not in ['target', 'era'] and not col.startswith('meta_model')]
+                        base_models_predictions = window_oof_data[base_model_names]
+                        true_targets = window_oof_data['target']
+                        eras_series = window_oof_data['era']
+
+                        if true_targets.notnull().any():
+                            model_name_to_path = {col: self.latest_trained_model_paths.get(col) for col in base_model_names}
+                            for col, model_path in model_name_to_path.items():
+                                if not model_path:
+                                    raise ValueError(f"No trained model path found for base model {col}")
+
+                            meta_model = clone(self.meta)
+                            meta_model_name = f"meta_model_{window_size}"
+                            cache_id = [train_data.shape, sorted(train_data.columns.tolist()), window_eras, window_size,
+                                        test_era, self.horizon_eras, self.models,
+                                        meta_model.meta_eras, meta_model.max_ensemble_size, meta_model.weight_factor]
+                            cache_hash = get_cache_hash(cache_id)
+                            trained_meta_model_name = f"{meta_model_name}_{test_era}_{cache_hash}"
+                            model_path = os.path.join(self.era_models_dir, f"{trained_meta_model_name}.pkl")
+                            predictions_path = os.path.join(f"{self.cache_dir}/{trained_meta_model_name}_predictions.pkl")
+
+                            if os.path.exists(model_path):
+                                with open(model_path, 'rb') as f:
+                                    meta_model = pickle.load(f)
                             else:
-                                print(f"Meta model window size: {window_size}, Eras: {min(window_eras)} - {max(window_eras)}")
-                            print(f"Test eras: {eras_batch}")
+                                combined_df = base_models_predictions.copy()
+                                combined_df['target'] = true_targets
+                                combined_df['era'] = eras_series
+                                meta_model.fit(
+                                    base_models_predictions,
+                                    combined_df['target'],
+                                    combined_df['era'],
+                                    model_name_to_path, train_data.drop(columns=[self.era_column]), train_targets['target_cyrusd_20'].squeeze())
+                                with open(model_path, 'wb') as f:
+                                    pickle.dump(meta_model, f)
 
-                            window_oof_data = oof_all[oof_all['era'].isin(window_eras)]
+                            self.latest_trained_meta_model_paths[window_size] = model_path
+                            self.meta_weights[trained_meta_model_name] = meta_model.weights_
 
-                            base_model_names = [col for col in window_oof_data.columns if col not in ['target', 'era'] and not col.startswith('meta_model')]
-                            base_models_predictions = window_oof_data[base_model_names]
-                            true_targets = window_oof_data['target']
-                            eras_series = window_oof_data['era']
+                            # Check for cached meta predictions
+                            if os.path.exists(predictions_path):
+                                print(f"Loading cached meta predictions for {meta_model_name} in era {test_era}")
+                                with open(predictions_path, 'rb') as f:
+                                    meta_predictions = pickle.load(f)
+                            else:
+                                print(f"Generating new meta predictions for {meta_model_name} in era {test_era}")
+                                meta_predictions = meta_model.predict(test_data.drop(columns=[self.era_column]))
 
-                            if true_targets.notnull().any():
-                                model_name_to_path = {col: self.latest_trained_model_paths.get(col) for col in base_model_names}
-                                for col, model_path in model_name_to_path.items():
-                                    if not model_path:
-                                        raise ValueError(f"No trained model path found for base model {col}")
+                                with open(predictions_path, 'wb') as f:
+                                    pickle.dump(meta_predictions, f)
 
-                                meta_model = clone(self.meta)
-                                meta_model_name = f"meta_model_{window_size}"
-                                cache_id = [train_data.shape, sorted(train_data.columns.tolist()), window_eras, window_size,
-                                            eras_batch, self.purge_eras, self.models,
-                                            meta_model.meta_eras, meta_model.max_ensemble_size, meta_model.weight_factor]
-                                cache_hash = get_cache_hash(cache_id)
-                                trained_meta_model_name = f"{meta_model_name}_{eras_batch[-1]}_{cache_hash}"
-                                model_path = os.path.join(self.era_models_dir, f"{trained_meta_model_name}.pkl")
-                                predictions_path = os.path.join(f"{self.cache_dir}/{trained_meta_model_name}_predictions.pkl")
+                            combined_predictions[meta_model_name] = meta_predictions
 
-                                if os.path.exists(model_path):
-                                    with open(model_path, 'rb') as f:
-                                        meta_model = pickle.load(f)
-                                else:
-                                    combined_df = base_models_predictions.copy()
-                                    combined_df['target'] = true_targets
-                                    combined_df['era'] = eras_series
-                                    meta_model.fit(
-                                        base_models_predictions,
-                                        combined_df['target'],
-                                        combined_df['era'],
-                                        model_name_to_path, train_data.drop(columns=[self.era_column]), train_targets['target_cyrusd_20'].squeeze())
-                                    with open(model_path, 'wb') as f:
-                                        pickle.dump(meta_model, f)
-
-                                self.latest_trained_meta_model_paths[window_size] = model_path
-                                self.meta_weights[trained_meta_model_name] = meta_model.weights_
-
-                                if os.path.exists(predictions_path):
-                                    print(f"Loading cached meta predictions for {meta_model_name} in eras {eras_batch}")
-                                    with open(predictions_path, 'rb') as f:
-                                        meta_predictions = pickle.load(f)
-                                else:
-                                    print(f"Generating new meta predictions for {meta_model_name} in eras {eras_batch}")
-                                    meta_predictions = meta_model.predict(test_data_batch.drop(columns=[self.era_column]))
-
-                                    with open(predictions_path, 'wb') as f:
-                                        pickle.dump(meta_predictions, f)
-
-                                combined_predictions[meta_model_name] = meta_predictions
-
-                                oof_df = combined_predictions.copy()
-                                oof_df['target'] = test_targets_batch['target_cyrusd_20'].squeeze()
-                                oof_df['era'] = test_data_batch[self.era_column]
-                                self.oof_dfs[-1] = oof_df
-
-                if self.evaluate_per_era:
-                    self.oof_data = pd.concat(self.oof_dfs)
-                    self.predictions = predictions
-                    self.evaluate(X_test, y_test)
+                            oof_df = combined_predictions.copy()
+                            oof_df['target'] = test_targets['target_cyrusd_20'].squeeze()
+                            oof_df['era'] = test_data[self.era_column]
+                            self.oof_dfs[-1] = oof_df
 
             iteration += 1
-            i += self.step_eras
+
+            if self.evaluate_per_era:
+                # evaluate up to this point
+                self.oof_data = pd.concat(self.oof_dfs)
+                self.predictions = predictions
+                self.evaluate(X_test, y_test)
 
         if self.final_models_dir is not None and last_era_with_targets is not None:
             print(f"Saving final models to {self.final_models_dir}")
+            # Save the latest retrained base models
             for model_name, model_attrs in self.models.items():
                 model_path = self.latest_trained_model_paths.get(model_name)
                 if model_path:
@@ -331,6 +336,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 else:
                     print(f"No retrained model found for {model_name}")
 
+            # Save the latest meta models
             if self.meta is not None:
                 for window_size, meta_model_path in self.latest_trained_meta_model_paths.items():
                     meta_model = self._load_model(meta_model_path)
@@ -342,7 +348,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.evaluate(X_test, y_test)
 
         return self
-
 
     def evaluate(self, X, y):
         evaluator = NumeraiClassicEvaluator(
@@ -478,8 +483,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
         if not self.models or len(self.models) == 0:
             raise ValueError("No models provided. Please check models.")
 
-        if not isinstance(self.purge_eras, int) or self.purge_eras <= 0:
-            raise ValueError(f"purge_eras must be a positive integer, got {self.purge_eras}.")
+        if not isinstance(self.horizon_eras, int) or self.horizon_eras <= 0:
+            raise ValueError(f"horizon_eras must be a positive integer, got {self.horizon_eras}.")
 
         if self.meta is not None:
             if not hasattr(self.meta, 'fit'):
