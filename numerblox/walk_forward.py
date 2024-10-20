@@ -12,6 +12,7 @@ import base64
 from io import BytesIO
 import re
 import logging
+import math
 
 
 def _check_sklearn_compatibility(model):
@@ -38,7 +39,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
     def __init__(self, models, purge_eras=4, era_column="era", meta=None,
                  era_models_dir='tmp/era_models', final_models_dir='tmp/final_models', artifacts_dir='tmp/artifacts',
-                 cache_dir='tmp/cache', log_dir='tmp/logs', expand_train=False, evaluate_per_era=True, step_eras=1,
+                 cache_dir='tmp/cache', log_dir='tmp/logs', expand_train=False, evaluate_per_step=True, step_eras=1,
                  target_name="target_cyrusd_20"):
         self.models = models
         self.purge_eras = purge_eras
@@ -52,7 +53,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.expand_train = expand_train
         self.artifacts_dir = artifacts_dir
         self.cache_dir = cache_dir
-        self.evaluate_per_era = evaluate_per_era
+        self.evaluate_per_step = evaluate_per_step
         self.step_eras = step_eras
         self.log_dir = log_dir
         self.target_name = target_name
@@ -143,8 +144,13 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
         i = 0
         num_eras_to_test = len(eras_to_test)
+        total_iterations = math.ceil(num_eras_to_test / self.step_eras)
         while i < num_eras_to_test:
             eras_batch = eras_to_test[i:i + self.step_eras]
+            current_iteration = (i // self.step_eras) + 1  # Calculate the current iteration properly
+            percent_complete = (current_iteration / total_iterations) * 100  # Correct percentage calculation
+
+            self.logger.info(f"Iteration {current_iteration} of {total_iterations}, Step: {self.step_eras}, Percent: {int(percent_complete)}%")
 
             test_data_batch = X_test[X_test[self.era_column].isin(eras_batch)]
             test_targets_batch = y_test.loc[test_data_batch.index]
@@ -385,37 +391,38 @@ class WalkForward(BaseEstimator, RegressorMixin):
                                 oof_df['era'] = test_data_batch[self.era_column]
                                 self.oof_dfs[-1] = oof_df
 
-                if self.evaluate_per_era:
+                if self.evaluate_per_step:
                     self.oof_data = pd.concat(self.oof_dfs).groupby(level=0).first().sort_values(by='era')
                     self.predictions = predictions
+                    self.logger.info(f"Evaluating predictions, Eras: {_format_ranges(range(start_test_era, max(eras_batch) + 1))}, Artifacts: {self.artifacts_dir}")
                     self.evaluate(X_test, y_test)
 
             iteration += 1
             i += self.step_eras
 
-        if self.final_models_dir is not None and last_era_with_targets is not None:
-            print(f"Saving final models to {self.final_models_dir}")
+        if self.final_models_dir is not None:
             for model_name, model_attrs in self.models.items():
                 model_path = self.latest_trained_model_paths.get(model_name)
                 if model_path:
                     model = self._load_model(model_path)
                     final_model_name = f"{model_name}"
                     self._save_model(model, final_model_name, is_final=True)
-                else:
-                    print(f"No retrained model found for {model_name}")
+                    self.logger.info(f"Final trained model: {model_path} to {self.final_models_dir}/{final_model_name}")
 
             if self.meta is not None:
                 for window_size, meta_model_path in self.latest_trained_meta_model_paths.items():
                     meta_model = self._load_model(meta_model_path)
                     final_meta_model_name = f"meta_model_{window_size}"
                     self._save_model(meta_model, final_meta_model_name, is_final=True)
+                    self.logger.info(f"Final meta-model: {self.final_models_dir}/{final_meta_model_name}")
 
-        self.oof_data = pd.concat(self.oof_dfs).groupby(level=0).first().sort_values(by='era')
-        self.predictions = predictions
-        self.evaluate(X_test, y_test)
+        if self.evaluate_per_step is False:
+            self.oof_data = pd.concat(self.oof_dfs).groupby(level=0).first().sort_values(by='era')
+            self.predictions = predictions
+            self.logger.info(f"Evaluating predictions, Eras: {_format_ranges(range(start_test_era, max(eras_batch) + 1))}, Artifacts: {self.artifacts_dir}")
+            self.evaluate(X_test, y_test)
 
         return self
-
 
 
     def evaluate(self, X, y):
