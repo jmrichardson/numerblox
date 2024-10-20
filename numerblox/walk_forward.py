@@ -310,15 +310,17 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 self.oof_dfs.append(oof_df)
 
                 if self.meta is not None:
-                    self.oof_data = pd.concat(self.oof_dfs)
+                    oof_data = pd.concat(self.oof_dfs)
                     last_target_era = eras_batch[-1] - self.purge_eras - 1
+
                     if len(oof_pre) > 0:
-                        oof_all = self.oof_data.combine_first(oof_pre)
+                        oof_all = oof_data.combine_first(oof_pre)
                         oof_all = oof_all.sort_values(by='era', ascending=True)
                         available_eras = [era for era in oof_all['era'].unique() if era <= last_target_era]
                     else:
-                        oof_all = self.oof_data.copy()
-                        available_eras = [era for era in self.oof_data['era'].unique() if era <= last_target_era]
+                        oof_all = oof_data.copy()
+                        available_eras = [era for era in oof_data['era'].unique() if era <= last_target_era]
+
                     for window_size in self.meta.meta_eras:
                         if len(available_eras) >= 1 and len(self.models) > 1:
                             window_eras = available_eras[-window_size:]
