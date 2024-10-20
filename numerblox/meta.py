@@ -317,18 +317,16 @@ class MetaModel(BaseEstimator, RegressorMixin):
 
     def fit(
             self,
-            base_models_predictions: pd.DataFrame,
-            true_targets: pd.Series,
-            eras: pd.Series,
+            oof_data: pd.DataFrame,
+            # true_targets: pd.Series,
+            # eras: pd.Series,
             model_name_to_path: dict,
-            X: pd.DataFrame,
-            y: pd.Series,
             ensemble_method=GreedyEnsemble,
     ) -> 'MetaModel':
 
         # If weight_factor is provided, calculate sample weights based on eras
         if self.weight_factor is not None:
-            sample_weights = get_sample_weights(base_models_predictions, wfactor=self.weight_factor, eras=eras)
+            sample_weights = get_sample_weights(base_models_predictions, wfactor=self.weight_factor, eras=oof_data.era)
         else:
             sample_weights = None
 
@@ -337,12 +335,13 @@ class MetaModel(BaseEstimator, RegressorMixin):
             ensemble_method = ensemble_method(max_ensemble_size=self.max_ensemble_size, random_state=self.random_state)
 
         # Filter valid rows (where true_targets are not null)
-        valid_idx = true_targets.notnull()
-        base_models_predictions = base_models_predictions.loc[valid_idx]
-        true_targets = true_targets.loc[valid_idx]
+        # valid_idx = true_targets.notnull()
+        # base_models_predictions = base_models_predictions.loc[valid_idx]
+        # true_targets = true_targets.loc[valid_idx]
+        oof = oof_data.dropna(subset=['target']).copy()
 
         # Fit the ensemble method with base model predictions, true targets, and sample weights
-        ensemble_method.fit(base_models_predictions, true_targets, sample_weights)
+        ensemble_method.fit(oof.drop(columns=['era']), sample_weights)
 
         # Get the names of the selected models and their weights
         self.selected_model_names = ensemble_method.selected_model_names_

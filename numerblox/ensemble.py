@@ -231,17 +231,11 @@ class GreedyEnsemble:
             raise TypeError("Metric must be a string or a callable.")
 
     def fit(self,
-            base_models_predictions: pd.DataFrame,
-            true_targets: pd.Series,
+            oof_data: pd.DataFrame,
             sample_weights: pd.Series = None):
 
-        if base_models_predictions.empty:
-            raise ValueError("No models found in base_models_predictions.")
-        if true_targets.empty:
-            raise ValueError("true_targets cannot be empty.")
-
         rng = check_random_state(self.random_state)
-        model_names = base_models_predictions.columns.tolist()
+        model_names = oof_data.drop(columns=["target"]).columns.tolist()
         n_models = len(model_names)
 
         if self.max_ensemble_size < 1:
@@ -252,9 +246,9 @@ class GreedyEnsemble:
             for _ in range(self.num_bags):
                 n_bag_models = max(1, int(n_models * self.bag_fraction))
                 bag_model_names = rng.choice(model_names, size=n_bag_models, replace=False)
-                bag_predictions = base_models_predictions[bag_model_names]
+                bag_oof_data = oof_data[["target"] + bag_model_names]
 
-                bag_weights = self._fit_ensemble(bag_predictions, true_targets, sample_weights)
+                bag_weights = self._fit_ensemble(bag_oof_data, sample_weights)
                 ensemble_weights_list.append(bag_weights)
 
             weights_df = pd.concat(ensemble_weights_list, axis=1).fillna(0)
@@ -262,17 +256,16 @@ class GreedyEnsemble:
             self.weights_ = self.weights_ / (self.weights_.sum() + 1e-8)
 
         else:
-            self.weights_ = self._fit_ensemble(base_models_predictions, true_targets, sample_weights)
+            self.weights_ = self._fit_ensemble(oof_data, sample_weights)
 
         self.selected_model_names_ = self.weights_[self.weights_ > 0].index.tolist()
 
     def _fit_ensemble(self,
-                      base_models_predictions: pd.DataFrame,
-                      true_targets: pd.Series,
-                      sample_weights: pd.Series):
+                      oof_data: pd.DataFrame,
+                      sample_weights: pd.Series = None):
 
-        model_names = base_models_predictions.columns.tolist()
-        current_ensemble_predictions = pd.Series(0.0, index=base_models_predictions.index)
+        model_names = oof_data.drop(columns=["target"]).columns.tolist()
+        current_ensemble_predictions = pd.Series(0.0, index=oof_data.index)
         ensemble_indices = []
         ensemble_scores = []
         used_model_counts = Counter()
@@ -280,8 +273,8 @@ class GreedyEnsemble:
         if self.sorted_initialization:
             model_scores = {}
             for model_name in model_names:
-                predictions = base_models_predictions[model_name]
-                score = self.metric(true_targets, predictions, sample_weight=sample_weights)
+                predictions = oof_data[model_name]
+                score = self.metric(oof_data["target"], predictions, sample_weight=sample_weights)
                 model_scores[model_name] = score
             sorted_models = sorted(model_scores.items(), key=lambda x: x[1], reverse=True)
             if self.initial_n is None:
@@ -290,7 +283,7 @@ class GreedyEnsemble:
                 N = self.initial_n
             for i in range(N):
                 model_name = sorted_models[i][0]
-                current_ensemble_predictions += base_models_predictions[model_name]
+                current_ensemble_predictions += oof_data[model_name]
                 ensemble_indices.append(model_name)
                 used_model_counts[model_name] += 1
             current_ensemble_predictions /= N
@@ -308,11 +301,11 @@ class GreedyEnsemble:
                 break
 
             for model_name in candidate_model_names:
-                model_predictions = base_models_predictions[model_name]
+                model_predictions = oof_data[model_name]
                 combined_predictions = (current_ensemble_predictions * len(ensemble_indices) + model_predictions) / (
-                            len(ensemble_indices) + 1)
+                        len(ensemble_indices) + 1)
 
-                score = self.metric(true_targets, combined_predictions, sample_weight=sample_weights)
+                score = self.metric(oof_data["target"], combined_predictions, sample_weight=sample_weights)
 
                 if best_score is None or score > best_score:
                     best_score = score
@@ -324,7 +317,7 @@ class GreedyEnsemble:
             ensemble_indices.append(best_model_name)
             used_model_counts[best_model_name] += 1
             current_ensemble_predictions = (current_ensemble_predictions * (len(ensemble_indices) - 1) +
-                                            base_models_predictions[best_model_name]) / len(ensemble_indices)
+                                            oof_data[best_model_name]) / len(ensemble_indices)
             ensemble_scores.append(best_score)
 
         if ensemble_scores:

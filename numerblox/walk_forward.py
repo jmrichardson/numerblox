@@ -134,7 +134,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
         last_era_with_targets = None
 
         self.oof_dfs = []
-        self.latest_trained_model_paths = {}
         self.latest_trained_meta_model_paths = {}
         self.meta_weights = {}
         oof_pre = []
@@ -168,6 +167,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                         self.logger.info(f"Load base model cache: {model_name}, Train eras: {_format_ranges(train_data.era.unique())}, Num eras: {len(train_data.era.unique())}")
                         with open(model_path, 'rb') as f:
                             model = pickle.load(f)
+                        self.latest_trained_model_paths[f"{model_name}_base"] = model_path
                     else:
                         fit_kwargs = model_attrs.get('fit_kwargs', {}).copy()
                         sample_weights = fit_kwargs.get('sample_weight', None)
@@ -180,6 +180,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                         self.logger.info(f"Train base model: {model_name}, Train eras: {_format_ranges(train_data.era.unique())}, Num eras: {len(train_data.era.unique())}")
 
                         model.fit(train_data.drop(columns=[self.era_column]), train_targets, **fit_kwargs)
+                        self.latest_trained_model_paths[f"{model_name}_base"] = model_path
                         with open(model_path, 'wb') as f:
                             pickle.dump(model, f)
 
@@ -324,21 +325,16 @@ class WalkForward(BaseEstimator, RegressorMixin):
                     for window_size in self.meta.meta_eras:
                         if len(available_eras) >= 1 and len(self.models) > 1:
                             window_eras = available_eras[-window_size:]
-                            print(f"Meta model window size: {window_size}")
-                            if len(window_eras) == 1:
-                                print(f"Meta model window era: {window_eras[0]}")
-                            else:
-                                print(f"Meta model window size: {window_size}, Eras: {min(window_eras)} - {max(window_eras)}")
-                            print(f"Test eras: {eras_batch}")
 
                             window_oof_data = oof_all[oof_all['era'].isin(window_eras)]
 
                             base_model_names = [col for col in window_oof_data.columns if col not in ['target', 'era'] and not col.startswith('meta_model')]
-                            base_models_predictions = window_oof_data[base_model_names]
-                            true_targets = window_oof_data['target']
-                            eras_series = window_oof_data['era']
+                            # base_model_names + ['era', 'target']
+                            window_oof_data = window_oof_data[base_model_names + ['era', 'target']]
+                            # true_targets = window_oof_data['target']
+                            # eras_series = window_oof_data['era']
 
-                            if true_targets.notnull().any():
+                            if window_oof_data.target.notnull().any():
                                 model_name_to_path = {col: self.latest_trained_model_paths.get(col) for col in base_model_names}
                                 for col, model_path in model_name_to_path.items():
                                     if not model_path:
@@ -347,7 +343,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                                 meta_model = clone(self.meta)
                                 meta_model_name = f"meta_model_{window_size}"
                                 cache_id = [train_data.shape, sorted(train_data.columns.tolist()), window_eras, window_size,
-                                            eras_batch, self.purge_eras, self.models,
+                                            available_eras, eras_batch, self.purge_eras, self.models, meta_model_name,
                                             meta_model.meta_eras, meta_model.max_ensemble_size, meta_model.weight_factor]
                                 cache_hash = get_cache_hash(cache_id)
                                 trained_meta_model_name = f"{meta_model_name}_{eras_batch[-1]}_{cache_hash}"
@@ -355,17 +351,14 @@ class WalkForward(BaseEstimator, RegressorMixin):
                                 predictions_path = os.path.join(f"{self.cache_dir}/{trained_meta_model_name}_predictions.pkl")
 
                                 if os.path.exists(model_path):
+                                    self.logger.info(f"Load meta cache {meta_model_name}: OOS Eras: {_format_ranges(window_oof_data.era.unique())}, Num OOS eras: {len(window_oof_data.era.unique())}")
                                     with open(model_path, 'rb') as f:
                                         meta_model = pickle.load(f)
                                 else:
-                                    combined_df = base_models_predictions.copy()
-                                    combined_df['target'] = true_targets
-                                    combined_df['era'] = eras_series
+                                    self.logger.info(f"Meta {meta_model_name}: OOS Eras: {_format_ranges(window_oof_data.era.unique())}, Num OOS eras: {len(window_oof_data.era.unique())}")
                                     meta_model.fit(
-                                        base_models_predictions,
-                                        combined_df['target'],
-                                        combined_df['era'],
-                                        model_name_to_path, train_data.drop(columns=[self.era_column]), train_targets.squeeze())
+                                        window_oof_data,
+                                        model_name_to_path)
                                     with open(model_path, 'wb') as f:
                                         pickle.dump(meta_model, f)
 
@@ -373,11 +366,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
                                 self.meta_weights[trained_meta_model_name] = meta_model.weights_
 
                                 if os.path.exists(predictions_path):
-                                    print(f"Load cached meta predictions for {meta_model_name} in eras {eras_batch}")
+                                    self.logger.info(f"Load meta predictions cache: {meta_model_name}, Prediction eras: {_format_ranges(test_data_batch.era.unique())}, Num eras: {len(test_data_batch.era.unique())}")
                                     with open(predictions_path, 'rb') as f:
                                         meta_predictions = pickle.load(f)
                                 else:
-                                    print(f"Generating new meta predictions for {meta_model_name} in eras {eras_batch}")
+                                    self.logger.info(f"Predict meta: {meta_model_name}, Prediction eras: {_format_ranges(test_data_batch.era.unique())}, Num eras: {len(test_data_batch.era.unique())}")
                                     meta_predictions = meta_model.predict(test_data_batch.drop(columns=[self.era_column]))
 
                                     with open(predictions_path, 'wb') as f:
