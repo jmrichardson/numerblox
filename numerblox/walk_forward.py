@@ -199,6 +199,10 @@ class WalkForward(BaseEstimator, RegressorMixin):
                             pickle.dump(predictions_filtered, f)
                     predictions.loc[test_data_filtered.index, f'{model_name}_base'] = predictions_filtered
 
+                    # First iteration, base models and era models are identical
+                    eras_batch_predictions = predictions_filtered.reindex(test_data_filtered[test_data_filtered['era'].isin(eras_batch)].index)
+                    predictions.loc[eras_batch_predictions.index, f'{model_name}'] = eras_batch_predictions
+
                     if hasattr(model, "target"):
                         horizon = int(int(re.search(r'_(\d+)$', model.target).group(1)) / 5)
                         if self.purge_eras < horizon:
@@ -311,7 +315,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 self.oof_dfs.append(oof_df)
 
                 if self.meta is not None:
-                    oof_data = pd.concat(self.oof_dfs)
+                    oof_data = pd.concat(self.oof_dfs).groupby(level=0).first().sort_values(by='era')
                     last_target_era = eras_batch[-1] - self.purge_eras - 1
 
                     if len(oof_pre) > 0:
@@ -328,14 +332,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
                             window_oof_data = oof_all[oof_all['era'].isin(window_eras)]
 
-                            base_model_names = [col for col in window_oof_data.columns if col not in ['target', 'era'] and not col.startswith('meta_model')]
-                            # base_model_names + ['era', 'target']
-                            window_oof_data = window_oof_data[base_model_names + ['era', 'target']]
-                            # true_targets = window_oof_data['target']
-                            # eras_series = window_oof_data['era']
+                            era_model_names = [col for col in window_oof_data.columns if col not in ['target', 'era'] and not col.startswith('meta_model') and not col.endswith('_base')]
+                            window_oof_data = window_oof_data[era_model_names + ['era', 'target']]
 
                             if window_oof_data.target.notnull().any():
-                                model_name_to_path = {col: self.latest_trained_model_paths.get(col) for col in base_model_names}
+                                model_name_to_path = {col: self.latest_trained_model_paths.get(col) for col in era_model_names}
                                 for col, model_path in model_name_to_path.items():
                                     if not model_path:
                                         raise ValueError(f"No trained model path found for base model {col}")
@@ -343,7 +344,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                                 meta_model = clone(self.meta)
                                 meta_model_name = f"meta_model_{window_size}"
                                 cache_id = [train_data.shape, sorted(train_data.columns.tolist()), window_eras, window_size,
-                                            available_eras, eras_batch, self.purge_eras, self.models, meta_model_name,
+                                            available_eras, eras_batch, self.purge_eras, self.models, meta_model_name, meta_data,
                                             meta_model.meta_eras, meta_model.max_ensemble_size, meta_model.weight_factor]
                                 cache_hash = get_cache_hash(cache_id)
                                 trained_meta_model_name = f"{meta_model_name}_{eras_batch[-1]}_{cache_hash}"
@@ -356,9 +357,14 @@ class WalkForward(BaseEstimator, RegressorMixin):
                                         meta_model = pickle.load(f)
                                 else:
                                     self.logger.info(f"Meta {meta_model_name}: OOS Eras: {_format_ranges(window_oof_data.era.unique())}, Num OOS eras: {len(window_oof_data.era.unique())}")
+
+                                    if meta_data is not None:
+                                        oof_meta_data = meta_data.reindex(window_oof_data.index)
+
                                     meta_model.fit(
                                         window_oof_data,
-                                        model_name_to_path)
+                                        model_name_to_path,
+                                        oof_meta_data)
                                     with open(model_path, 'wb') as f:
                                         pickle.dump(meta_model, f)
 

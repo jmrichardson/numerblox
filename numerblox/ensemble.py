@@ -7,7 +7,7 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from collections import Counter
 from typing import Callable, List, Union
 from sklearn.utils import check_random_state
-from .misc import numerai_corr_weighted, mmc_weighted
+from .misc import numerai_payout_score, mmc_score, numerai_corr_score
 
 
 class NumeraiEnsemble(BaseEstimator, TransformerMixin):
@@ -187,9 +187,7 @@ class PredictionReducer(BaseEstimator, TransformerMixin):
         return [f"reduced_prediction_{i}" for i in range(self.n_models)] if not input_features else input_features
 
 
-def numerai_score(corr, mmc):
-    score = clip(payout_factor * (corr * 0.5 + mmc * 2), -0.05, 0.05)
-    return score
+
 
 
 class GreedyEnsemble:
@@ -199,7 +197,6 @@ class GreedyEnsemble:
                  use_replacement: bool = True,
                  sorted_initialization: bool = True,
                  initial_n: int = None,
-                 bagging: bool = False,
                  bag_fraction: float = 0.5,
                  num_bags: int = 20,
                  random_state: Union[int, None] = None):
@@ -208,7 +205,6 @@ class GreedyEnsemble:
         self.use_replacement = use_replacement
         self.sorted_initialization = sorted_initialization
         self.initial_n = initial_n
-        self.bagging = bagging
         self.bag_fraction = bag_fraction
         self.num_bags = num_bags
         self.random_state = random_state
@@ -218,11 +214,11 @@ class GreedyEnsemble:
 
         if isinstance(metric, str):
             if metric == "corr":
-                self.metric = numerai_corr_weighted
+                self.metric = numerai_corr_score
             elif metric == "mmc":
-                self.metric = mmc_weighted
+                self.metric = mmc_score
             elif metric == "score":
-                self.metric = numerai_score
+                self.metric = numerai_payout_score
             else:
                 raise ValueError("Unsupported metric string. Choose 'corr', 'mmc', or 'score'.")
         elif callable(metric):
@@ -232,39 +228,21 @@ class GreedyEnsemble:
 
     def fit(self,
             oof_data: pd.DataFrame,
+            meta_data = None,
             sample_weights: pd.Series = None):
 
+        oof_data = oof_data.dropna(subset=['target'])
+
         rng = check_random_state(self.random_state)
-        model_names = oof_data.drop(columns=["target"]).columns.tolist()
+        oof_targets = oof_data.target
+        oof_eras = oof_data.era
+        oof_predictions = oof_data.drop(columns=['era', 'target'])
+        model_names = oof_predictions.columns.tolist()
         n_models = len(model_names)
 
         if self.max_ensemble_size < 1:
             raise ValueError("Ensemble size cannot be less than one!")
 
-        if self.bagging:
-            ensemble_weights_list = []
-            for _ in range(self.num_bags):
-                n_bag_models = max(1, int(n_models * self.bag_fraction))
-                bag_model_names = rng.choice(model_names, size=n_bag_models, replace=False)
-                bag_oof_data = oof_data[["target"] + bag_model_names]
-
-                bag_weights = self._fit_ensemble(bag_oof_data, sample_weights)
-                ensemble_weights_list.append(bag_weights)
-
-            weights_df = pd.concat(ensemble_weights_list, axis=1).fillna(0)
-            self.weights_ = weights_df.mean(axis=1)
-            self.weights_ = self.weights_ / (self.weights_.sum() + 1e-8)
-
-        else:
-            self.weights_ = self._fit_ensemble(oof_data, sample_weights)
-
-        self.selected_model_names_ = self.weights_[self.weights_ > 0].index.tolist()
-
-    def _fit_ensemble(self,
-                      oof_data: pd.DataFrame,
-                      sample_weights: pd.Series = None):
-
-        model_names = oof_data.drop(columns=["target"]).columns.tolist()
         current_ensemble_predictions = pd.Series(0.0, index=oof_data.index)
         ensemble_indices = []
         ensemble_scores = []
@@ -273,8 +251,8 @@ class GreedyEnsemble:
         if self.sorted_initialization:
             model_scores = {}
             for model_name in model_names:
-                predictions = oof_data[model_name]
-                score = self.metric(oof_data["target"], predictions, sample_weight=sample_weights)
+                predictions = oof_predictions[model_name]
+                score = self.metric(oof_targets, predictions, oof_eras, meta_data=meta_data, sample_weight=sample_weights)
                 model_scores[model_name] = score
             sorted_models = sorted(model_scores.items(), key=lambda x: x[1], reverse=True)
             if self.initial_n is None:
@@ -283,7 +261,7 @@ class GreedyEnsemble:
                 N = self.initial_n
             for i in range(N):
                 model_name = sorted_models[i][0]
-                current_ensemble_predictions += oof_data[model_name]
+                current_ensemble_predictions += oof_predictions[model_name]
                 ensemble_indices.append(model_name)
                 used_model_counts[model_name] += 1
             current_ensemble_predictions /= N
@@ -301,11 +279,11 @@ class GreedyEnsemble:
                 break
 
             for model_name in candidate_model_names:
-                model_predictions = oof_data[model_name]
+                model_predictions = oof_predictions[model_name]
                 combined_predictions = (current_ensemble_predictions * len(ensemble_indices) + model_predictions) / (
                         len(ensemble_indices) + 1)
 
-                score = self.metric(oof_data["target"], combined_predictions, sample_weight=sample_weights)
+                score = self.metric(oof_targets, combined_predictions, oof_eras, meta_data=meta_data, sample_weight=sample_weights)
 
                 if best_score is None or score > best_score:
                     best_score = score
@@ -329,9 +307,9 @@ class GreedyEnsemble:
         model_counts = Counter(best_ensemble_indices)
         total_counts = sum(model_counts.values()) or 1
         weights = pd.Series({model_name: count / total_counts for model_name, count in model_counts.items()})
-        weights = weights.reindex(model_names).fillna(0.0)
+        self.weights_ = weights.reindex(model_names).fillna(0.0)
+        self.selected_model_names_ = self.weights_[self.weights_ > 0].index.tolist()
 
-        return weights
 
     def _determine_initial_n(self, scores):
         if len(scores) <= 1:

@@ -306,21 +306,20 @@ class MetaModel(BaseEstimator, RegressorMixin):
         The weights assigned to each base model in the ensemble.
     """
 
-    def __init__(self, max_ensemble_size: int = 7, random_state: int = 42, weight_factor: float = None, meta_eras: list = [1, 3, 12]):
+    def __init__(self, meta_eras, max_ensemble_size: int = 7, random_state: int = 42, weight_factor: float = None):
+        self.meta_eras = meta_eras  # Lookback periods for era-based model selection
         self.max_ensemble_size = max_ensemble_size
         self.random_state = random_state
         self.selected_model_names = []  # List to store the names of selected models
         self.selected_models = []  # List to store the actual models
         self.ensemble_model = None  # Placeholder for the final ensemble model
         self.weight_factor = weight_factor  # Weight factor used in sample weighting
-        self.meta_eras = meta_eras  # Lookback periods for era-based model selection
 
     def fit(
             self,
             oof_data: pd.DataFrame,
-            # true_targets: pd.Series,
-            # eras: pd.Series,
             model_name_to_path: dict,
+            meta_data=None,
             ensemble_method=GreedyEnsemble,
     ) -> 'MetaModel':
 
@@ -334,14 +333,10 @@ class MetaModel(BaseEstimator, RegressorMixin):
         if isinstance(ensemble_method, type):
             ensemble_method = ensemble_method(max_ensemble_size=self.max_ensemble_size, random_state=self.random_state)
 
-        # Filter valid rows (where true_targets are not null)
-        # valid_idx = true_targets.notnull()
-        # base_models_predictions = base_models_predictions.loc[valid_idx]
-        # true_targets = true_targets.loc[valid_idx]
         oof = oof_data.dropna(subset=['target']).copy()
 
         # Fit the ensemble method with base model predictions, true targets, and sample weights
-        ensemble_method.fit(oof.drop(columns=['era']), sample_weights)
+        ensemble_method.fit(oof, meta_data=meta_data, sample_weights=sample_weights)
 
         # Get the names of the selected models and their weights
         self.selected_model_names = ensemble_method.selected_model_names_
