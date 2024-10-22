@@ -101,75 +101,92 @@ class WalkForward(BaseEstimator, RegressorMixin):
         self.logger.addHandler(file_handler)
 
     def fit(self, X_train, y_train, X_test, y_test, meta_data=None):
+        # Validate the provided data
         self.validate_arguments(X_train, y_train, X_test, y_test)
         self.logger.info("Starting walk forward")
 
+        # Get unique train eras and log the details
         unique_train_eras = X_train[self.era_column].unique()
         start_train_era = min(unique_train_eras)
         end_train_era = max(unique_train_eras)
         self.logger.info(f"Train data: Rows: {X_train.shape[0]}, Cols: {X_train.shape[1]}, Eras: {len(unique_train_eras)}, Start era: {start_train_era}, End era: {end_train_era}")
 
+        # Get unique test eras and log the details
         unique_test_eras = X_test[self.era_column].unique()
         start_test_era = min(unique_test_eras)
         end_test_era = max(unique_test_eras)
         self.logger.info(f"Test data: Rows: {X_test.shape[0]}, Cols: {X_test.shape[1]}, Eras: {len(unique_test_eras)}, Start era: {start_test_era}, End era: {end_test_era}")
 
+        # Ensure era columns are integers and sort train and test data by era
         X_train[self.era_column] = X_train[self.era_column].astype(int)
         X_test[self.era_column] = X_test[self.era_column].astype(int)
         train_data = X_train.sort_values(by=self.era_column).copy()
         train_targets = y_train.loc[train_data.index].copy()
         X_test = X_test.sort_values(by=self.era_column).copy()
         y_test = y_test.loc[X_test.index].copy()
+
+        # Define the eras for testing, considering the purge period
         eras_test = sorted(X_test[self.era_column].unique())
         start_test_era = min(eras_test) + self.purge_eras
+
+        # Handle 'meta' data if present in X_test
         if "meta" in X_test:
             meta = X_test['meta']
             X_test = X_test.drop(columns=(['meta']))
         else:
             meta = None
 
+        # Only test eras that start after the purge era
         eras_to_test = [era for era in eras_test if era >= start_test_era]
 
         iteration = 0
         predictions = pd.DataFrame(index=X_test.index)
         last_era_with_targets = None
 
+        # Initialize lists and dictionaries for storing results
         self.oof_dfs = []
         self.latest_trained_meta_model_paths = {}
         self.meta_weights = {}
         oof_pre = []
 
+        # Log details about the purge period and base models
         self.logger.info(f"Purge eras: {self.purge_eras}, Test prediction eras after purge: {_format_ranges(eras_to_test)}")
         self.logger.info(f"Base Models: {len(self.models)}")
 
         i = 0
         num_eras_to_test = len(eras_to_test)
         total_iterations = math.ceil(num_eras_to_test / self.step_eras)
-        while i < num_eras_to_test:
-            eras_batch = eras_to_test[i:i + self.step_eras]
-            current_iteration = (i // self.step_eras) + 1  # Calculate the current iteration properly
-            percent_complete = (current_iteration / total_iterations) * 100  # Correct percentage calculation
 
+        # Start the walk-forward iterations
+        while i < num_eras_to_test:
+            # Define the current batch of eras to test and log iteration progress
+            eras_batch = eras_to_test[i:i + self.step_eras]
+            current_iteration = (i // self.step_eras) + 1
+            percent_complete = (current_iteration / total_iterations) * 100
             self.logger.info(f"Iteration {current_iteration} of {total_iterations}, Step: {self.step_eras}, Percent: {int(percent_complete)}%")
 
+            # Filter test data and targets for the current batch of eras
             test_data_batch = X_test[X_test[self.era_column].isin(eras_batch)]
             test_targets_batch = y_test.loc[test_data_batch.index]
 
             if iteration == 0:
-                # Base models are trained here and generate predictions for all test eras
+                # First iteration: train base models and generate predictions for all test eras
                 for model_name, model_attrs in self.models.items():
+                    # Load or train the base model
                     model = self._load_model(model_attrs['model_path'])
-                    cache_id = [train_data.shape, sorted(train_data.columns.tolist()), model_name,
-                                self.purge_eras, model_attrs]
+                    cache_id = [train_data.shape, sorted(train_data.columns.tolist()), model_name, self.purge_eras, model_attrs]
                     cache_hash = get_cache_hash(cache_id)
                     model_path = f"{self.cache_dir}/{model_name}_{cache_hash}_model.pkl"
                     predictions_path = f"{self.cache_dir}/{model_name}_{cache_hash}_predictions.pkl"
+
+                    # Load model from cache if available
                     if os.path.exists(model_path):
                         self.logger.info(f"Load base model cache: {model_name}, Train eras: {_format_ranges(train_data.era.unique())}, Num eras: {len(train_data.era.unique())}")
                         with open(model_path, 'rb') as f:
                             model = pickle.load(f)
                         self.latest_trained_model_paths[f"{model_name}_base"] = model_path
                     else:
+                        # Train the model if not cached
                         fit_kwargs = model_attrs.get('fit_kwargs', {}).copy()
                         sample_weights = fit_kwargs.get('sample_weight', None)
                         if sample_weights is not None:
@@ -179,7 +196,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
                         fit_kwargs = {k: v for k, v in fit_kwargs.items() if v is not None}
 
                         self.logger.info(f"Train base model: {model_name}, Train eras: {_format_ranges(train_data.era.unique())}, Num eras: {len(train_data.era.unique())}")
-
                         model.fit(train_data.drop(columns=[self.era_column]), train_targets, **fit_kwargs)
                         self.latest_trained_model_paths[f"{model_name}_base"] = model_path
                         with open(model_path, 'wb') as f:
@@ -192,18 +208,17 @@ class WalkForward(BaseEstimator, RegressorMixin):
                         with open(predictions_path, 'rb') as f:
                             predictions_filtered = pickle.load(f)
                     else:
-
                         self.logger.info(f"Predict base model: {model_name}, Prediction eras: {_format_ranges(test_data_filtered.era.unique())}, Num eras: {len(test_data_filtered.era.unique())}")
-
                         predictions_filtered = model.predict(test_data_filtered.drop(columns=[self.era_column]))
                         with open(predictions_path, 'wb') as f:
                             pickle.dump(predictions_filtered, f)
-                    predictions.loc[test_data_filtered.index, f'{model_name}_base'] = predictions_filtered
 
-                    # First iteration, base models and era models are identical
+                    # Store predictions and handle first iteration logic
+                    predictions.loc[test_data_filtered.index, f'{model_name}_base'] = predictions_filtered
                     eras_batch_predictions = predictions_filtered.reindex(test_data_filtered[test_data_filtered['era'].isin(eras_batch)].index)
                     predictions.loc[eras_batch_predictions.index, f'{model_name}'] = eras_batch_predictions
 
+                    # Handle model-specific settings
                     if hasattr(model, "target"):
                         horizon = int(int(re.search(r'_(\d+)$', model.target).group(1)) / 5)
                         if self.purge_eras < horizon:
@@ -214,6 +229,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                         df.rename(columns={"predict": f"{model_name}"}, inplace=True)
                         oof_pre.append(df)
 
+                # Combine out-of-fold predictions if available
                 if oof_pre:
                     common_cols = oof_pre[0][['era', 'target']]
                     specific_cols = [df.drop(['era', 'target', 'group'], axis=1) for df in oof_pre]
@@ -221,12 +237,12 @@ class WalkForward(BaseEstimator, RegressorMixin):
                     oof_pre = pd.concat([common_cols, concatenated_specific_cols], axis=1).dropna()
                     oof_pre['era'] = oof_pre.era.astype(int)
 
-                # Create oof_df for the entire test set
+                # Create the out-of-fold DataFrame for the entire test set
                 combined_predictions = predictions.loc[test_data_filtered.index]
                 oof_df = combined_predictions.copy()
 
+                # Set target values in the out-of-fold DataFrame
                 test_targets_all = y_test.loc[test_data_filtered.index]
-
                 if isinstance(test_targets_all, pd.DataFrame):
                     oof_df['target'] = test_targets_all[self.target_name].squeeze()
                 else:
@@ -236,17 +252,20 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 self.oof_dfs.append(oof_df)
 
             else:
+                # Iteration for expanding or sliding window of training data
                 if not self.expand_train:
                     oldest_eras = sorted(train_data[self.era_column].unique())[:self.step_eras]
                     train_data = train_data[~train_data[self.era_column].isin(oldest_eras)]
                     train_targets = train_targets.loc[train_data.index]
 
+                # Add new eras to the training set
                 last_train_era = train_data[self.era_column].max()
                 next_train_eras = range(last_train_era + 1, last_train_era + 1 + self.step_eras)
 
                 new_train_data = pd.DataFrame()
                 new_train_targets = pd.Series()
 
+                # Retrieve new train data and targets for the next eras
                 for next_train_era in next_train_eras:
                     if next_train_era in X_train[self.era_column].unique():
                         era_data = X_train[X_train[self.era_column] == next_train_era]
@@ -264,9 +283,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
                     train_data = pd.concat([train_data, new_train_data])
                     train_targets = pd.concat([train_targets, new_train_targets])
 
+                # Make predictions for the current test batch
                 combined_predictions = pd.DataFrame(index=test_data_batch.index)
 
                 for model_name, model_attrs in self.models.items():
+                    # Train or load models for the current era
                     cache_id = [train_data.shape, sorted(train_data.columns.tolist()), model_name, self.purge_eras, model_attrs]
                     cache_hash = get_cache_hash(cache_id)
                     era_model_name = f"{model_name}_{eras_batch[-1]}"
@@ -295,6 +316,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                         self._save_model(model, trained_model_name)
                         self.latest_trained_model_paths[model_name] = model_path
 
+                    # Generate predictions for the current test batch
                     if os.path.exists(predictions_path):
                         self.logger.info(f"Load model predictions cache: {era_model_name}, Prediction eras: {_format_ranges(test_data_batch.era.unique())}, Num eras: {len(test_data_batch.era.unique())}")
                         with open(predictions_path, 'rb') as f:
@@ -306,6 +328,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                             pickle.dump(test_predictions, f)
                     combined_predictions[model_name] = test_predictions
 
+                # Store the combined predictions
                 combined_predictions = combined_predictions.reindex(test_data_batch.index)
                 oof_df = combined_predictions.copy()
                 if isinstance(test_targets_batch, pd.DataFrame):
@@ -315,10 +338,12 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 oof_df['era'] = test_data_batch[self.era_column]
                 self.oof_dfs.append(oof_df)
 
+                # If a meta model is provided, perform meta training
                 if self.meta is not None:
                     oof_data = pd.concat(self.oof_dfs).groupby(level=0).first().sort_values(by='era')
                     last_target_era = eras_batch[-1] - self.purge_eras - 1
 
+                    # Handle out-of-fold and available eras for meta training
                     if len(oof_pre) > 0:
                         oof_all = oof_data.combine_first(oof_pre)
                         oof_all = oof_all.sort_values(by='era', ascending=True)
@@ -327,15 +352,17 @@ class WalkForward(BaseEstimator, RegressorMixin):
                         oof_all = oof_data.copy()
                         available_eras = [era for era in oof_data['era'].unique() if era <= last_target_era]
 
+                    # Iterate through each window size for meta training
                     for window_size in self.meta.meta_eras:
                         if len(available_eras) >= 1 and len(self.models) > 1:
                             window_eras = available_eras[-window_size:]
-
                             window_oof_data = oof_all[oof_all['era'].isin(window_eras)]
 
+                            # Filter the data for the current window size
                             era_model_names = [col for col in window_oof_data.columns if col not in ['target', 'era'] and not col.startswith('meta_model') and not col.endswith('_base')]
                             window_oof_data = window_oof_data[era_model_names + ['era', 'target']]
 
+                            # Perform meta model fitting if there is target data available
                             if window_oof_data.target.notnull().any():
                                 model_name_to_path = {col: self.latest_trained_model_paths.get(col) for col in era_model_names}
                                 for col, model_path in model_name_to_path.items():
@@ -343,16 +370,14 @@ class WalkForward(BaseEstimator, RegressorMixin):
                                         raise ValueError(f"No trained model path found for base model {col}")
 
                                 meta_model = copy.deepcopy(self.meta)
-
                                 meta_model_name = f"meta_model_{window_size}"
-                                cache_id = [train_data.shape, sorted(train_data.columns.tolist()), window_eras, window_size,
-                                            available_eras, eras_batch, self.purge_eras, self.models, meta_model_name, meta_data,
-                                            meta_model.meta_eras, meta_model.max_ensemble_size, meta_model.weight_factor]
+                                cache_id = [train_data.shape, sorted(train_data.columns.tolist()), window_eras, window_size, available_eras, eras_batch, self.purge_eras, self.models, meta_model_name, meta_data, meta_model.meta_eras, meta_model.max_ensemble_size, meta_model.weight_factor]
                                 cache_hash = get_cache_hash(cache_id)
                                 trained_meta_model_name = f"{meta_model_name}_{eras_batch[-1]}_{cache_hash}"
                                 model_path = os.path.join(self.era_models_dir, f"{trained_meta_model_name}.pkl")
                                 predictions_path = os.path.join(f"{self.cache_dir}/{trained_meta_model_name}_predictions.pkl")
 
+                                # Load or train the meta model
                                 if os.path.exists(model_path):
                                     self.logger.info(f"Load meta cache {meta_model_name}: OOS Eras: {_format_ranges(window_oof_data.era.unique())}, Num OOS eras: {len(window_oof_data.era.unique())}")
                                     with open(model_path, 'rb') as f:
@@ -365,16 +390,15 @@ class WalkForward(BaseEstimator, RegressorMixin):
                                         if meta_data.isna().any():
                                             raise Exception(f"Meta data not available for historical window")
 
-                                    meta_model.fit(
-                                        window_oof_data,
-                                        model_name_to_path,
-                                        oof_meta_data)
+                                    meta_model.fit(window_oof_data, model_name_to_path, oof_meta_data)
                                     with open(model_path, 'wb') as f:
                                         pickle.dump(meta_model, f)
 
+                                # Store the meta model paths and weights
                                 self.latest_trained_meta_model_paths[window_size] = model_path
                                 self.meta_weights[trained_meta_model_name] = meta_model.weights_
 
+                                # Generate meta model predictions
                                 if os.path.exists(predictions_path):
                                     self.logger.info(f"Load meta predictions cache: {meta_model_name}, Prediction eras: {_format_ranges(test_data_batch.era.unique())}, Num eras: {len(test_data_batch.era.unique())}")
                                     with open(predictions_path, 'rb') as f:
@@ -382,12 +406,10 @@ class WalkForward(BaseEstimator, RegressorMixin):
                                 else:
                                     self.logger.info(f"Predict meta: {meta_model_name}, Prediction eras: {_format_ranges(test_data_batch.era.unique())}, Num eras: {len(test_data_batch.era.unique())}")
                                     meta_predictions = meta_model.predict(test_data_batch.drop(columns=[self.era_column]))
-
                                     with open(predictions_path, 'wb') as f:
                                         pickle.dump(meta_predictions, f)
 
                                 combined_predictions[meta_model_name] = meta_predictions
-
                                 oof_df = combined_predictions.copy()
                                 if isinstance(test_targets_batch, pd.DataFrame):
                                     oof_df['target'] = test_targets_batch[self.target_name].squeeze()
@@ -396,15 +418,18 @@ class WalkForward(BaseEstimator, RegressorMixin):
                                 oof_df['era'] = test_data_batch[self.era_column]
                                 self.oof_dfs[-1] = oof_df
 
+                # Evaluate the predictions per step if the flag is enabled
                 if self.evaluate_per_step:
                     self.oof_data = pd.concat(self.oof_dfs).groupby(level=0).first().sort_values(by='era')
                     self.predictions = predictions
                     self.logger.info(f"Evaluating predictions, Eras: {_format_ranges(range(start_test_era, max(eras_batch) + 1))}, Artifacts: {self.artifacts_dir}")
                     self.evaluate(X_test, y_test)
 
+            # Move to the next step of eras
             iteration += 1
             i += self.step_eras
 
+        # Save final models and meta-models if final_models_dir is set
         if self.final_models_dir is not None:
             for model_name, model_attrs in self.models.items():
                 model_path = self.latest_trained_model_paths.get(model_name)
@@ -421,6 +446,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                     self._save_model(meta_model, final_meta_model_name, is_final=True)
                     self.logger.info(f"Final meta-model: {self.final_models_dir}/{final_meta_model_name}")
 
+        # Evaluate the final predictions if evaluation was not done per step
         if self.evaluate_per_step is False:
             self.oof_data = pd.concat(self.oof_dfs).groupby(level=0).first().sort_values(by='era')
             self.predictions = predictions
@@ -428,7 +454,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
             self.evaluate(X_test, y_test)
 
         return self
-
 
     def evaluate(self, X, y):
         evaluator = NumeraiClassicEvaluator(
@@ -521,59 +546,49 @@ class WalkForward(BaseEstimator, RegressorMixin):
         return model_path
 
     def validate_arguments(self, X_train, y_train, X_test, y_test):
+        # Validate that inputs are pandas DataFrames
         if not isinstance(X_train, pd.DataFrame):
             raise TypeError(f"X_train must be a pandas DataFrame, got {type(X_train)} instead.")
         if not isinstance(X_test, pd.DataFrame):
             raise TypeError(f"X_test must be a pandas DataFrame, got {type(X_test)} instead.")
-        # if not isinstance(y_train, pd.Series):
-            # raise TypeError(f"y_train must be a pandas Series, got {type(y_train)} instead.")
-        # if not isinstance(y_test, pd.Series):
-            # raise TypeError(f"y_test must be a pandas Series, got {type(y_test)} instead.")
 
-        # Ensure y_train has no None values
-        # if y_train.isnull().any():
-            # raise ValueError("y_train contains None values, it must not have any.")
-
-        # Ensure y_test has at least one non-None value
-        # if y_test.isnull().all():
-            # raise ValueError("y_test contains only None values.")
-
-        # # Ensure X_train and X_test have the same number of columns
-        # if X_train.shape[1] != X_test.shape[1]:
-        #     raise ValueError(
-        #         f"X_train and X_test must have the same number of columns. Got {X_train.shape[1]} and {X_test.shape[1]}."
-        #     )
+        # Validate that target inputs (y_train, y_test) are either pandas Series or DataFrames
+        if not isinstance(y_train, (pd.Series, pd.DataFrame)):
+            raise TypeError(f"y_train must be a pandas Series or DataFrame, got {type(y_train)} instead.")
+        if not isinstance(y_test, (pd.Series, pd.DataFrame)):
+            raise TypeError(f"y_test must be a pandas Series or DataFrame, got {type(y_test)} instead.")
 
         # Ensure X_train and y_train have the same number of rows
         if X_train.shape[0] != y_train.shape[0]:
-            raise ValueError(
-                f"X_train and y_train must have the same number of rows. Got {X_train.shape[0]} and {y_train.shape[0]}."
-            )
+            raise ValueError(f"X_train and y_train must have the same number of rows. Got {X_train.shape[0]} and {y_train.shape[0]}.")
 
         # Ensure X_test and y_test have the same number of rows
         if X_test.shape[0] != y_test.shape[0]:
-            raise ValueError(
-                f"X_test and y_test must have the same number of rows. Got {X_test.shape[0]} and {y_test.shape[0]}."
-            )
+            raise ValueError(f"X_test and y_test must have the same number of rows. Got {X_test.shape[0]} and {y_test.shape[0]}.")
 
+        # Ensure the era_column is present in both X_train and X_test
         if self.era_column not in X_train.columns:
             raise ValueError(f"era_column '{self.era_column}' not found in X_train columns.")
         if self.era_column not in X_test.columns:
             raise ValueError(f"era_column '{self.era_column}' not found in X_test columns.")
 
-        if not self.models or len(self.models) == 0:
-            raise ValueError("No models provided. Please check models.")
-
+        # Ensure purge_eras is a positive integer
         if not isinstance(self.purge_eras, int) or self.purge_eras <= 0:
             raise ValueError(f"purge_eras must be a positive integer, got {self.purge_eras}.")
 
+        # Validate models are provided
+        if not self.models or len(self.models) == 0:
+            raise ValueError("No models provided. Please check models.")
+
+        # Validate meta model, if provided
         if self.meta is not None:
             if not hasattr(self.meta, 'fit'):
                 raise ValueError("Meta model provided must have a 'fit' method for ensemble training.")
             if not hasattr(self.meta, 'meta_eras'):
                 raise ValueError("Meta model provided must have a 'meta_eras' attribute.")
 
-        if self.era_models_dir is None or not isinstance(self.era_models_dir, str):
+        # Validate directories
+        if not isinstance(self.era_models_dir, str) or not self.era_models_dir:
             raise ValueError(f"Invalid era_models_dir. It must be a non-empty string, got {self.era_models_dir}.")
 
         if self.final_models_dir is not None and not isinstance(self.final_models_dir, str):
@@ -582,44 +597,32 @@ class WalkForward(BaseEstimator, RegressorMixin):
         if self.artifacts_dir is not None and not isinstance(self.artifacts_dir, str):
             raise ValueError(f"Invalid artifacts_dir. It must be a string or None, got {self.artifacts_dir}.")
 
-        # Ensure at least a 4-era difference between the last training era and the first test era
         train_eras = np.sort(X_train[self.era_column].unique())
         test_eras = np.sort(X_test[self.era_column].unique())
-
         if len(train_eras) < 1 or len(test_eras) < 1:
             raise ValueError("Both training and testing data must contain at least one era.")
 
-        # Check that sample weights (if provided) are identical within each era
+        # Validate sample weights per era, if provided
         for model_name, model_attrs in self.models.items():
             sample_weights = model_attrs.get('fit_kwargs', {}).get('sample_weight', None)
-
             if sample_weights is not None:
-                # Verify that all samples in each era have the same weight
                 if isinstance(sample_weights, pd.Series):
                     for era in train_eras:
                         era_weights = sample_weights[X_train[self.era_column] == era]
                         if era_weights.nunique() != 1:
-                            raise ValueError(
-                                f"Sample weights must be identical within each era for model {model_name}, era {era} has varying weights."
-                            )
+                            raise ValueError(f"Sample weights must be identical within each era for model {model_name}, era {era} has varying weights.")
                 elif isinstance(sample_weights, np.ndarray):
                     for era in train_eras:
                         era_weights = sample_weights[X_train[self.era_column] == era]
                         if len(np.unique(era_weights)) != 1:
-                            raise ValueError(
-                                f"Sample weights must be identical within each era for model {model_name}, era {era} has varying weights."
-                            )
+                            raise ValueError(f"Sample weights must be identical within each era for model {model_name}, era {era} has varying weights.")
                 else:
-                    raise ValueError(
-                        f"Sample weight for model {model_name} must be a pandas Series or numpy array, got {type(sample_weights)}."
-                    )
+                    raise ValueError(f"Sample weight for model {model_name} must be a pandas Series or numpy array, got {type(sample_weights)}.")
 
-        # If expand_train is True, ensure no sample weights are provided
+        # Ensure that sample weights are not provided when expand_train is True
         if self.expand_train:
             for model_name, model_attrs in self.models.items():
                 sample_weights = model_attrs.get('fit_kwargs', {}).get('sample_weight', None)
                 if sample_weights is not None:
-                    raise ValueError(
-                        f"Sample weights cannot be provided when expand_train is True, model {model_name} has sample weights."
-                    )
+                    raise ValueError(f"Sample weights cannot be provided when expand_train is True, model {model_name} has sample weights.")
 
