@@ -129,13 +129,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
         eras_test = sorted(X_test[self.era_column].unique())
         start_test_era = min(eras_test) + self.purge_eras
 
-        # Handle 'meta' data if present in X_test
-        if "meta" in X_test:
-            meta = X_test['meta']
-            X_test = X_test.drop(columns=(['meta']))
-        else:
-            meta = None
-
         # Only test eras that start after the purge era
         eras_to_test = [era for era in eras_test if era >= start_test_era]
 
@@ -163,7 +156,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
             eras_batch = eras_to_test[i:i + self.step_eras]
             current_iteration = (i // self.step_eras) + 1
             percent_complete = (current_iteration / total_iterations) * 100
-            self.logger.info(f"Iteration {current_iteration} of {total_iterations}, Step: {self.step_eras}, Percent: {int(percent_complete)}%")
+            self.logger.info(f"Iteration {current_iteration} of {total_iterations}, Step: {self.step_eras}, Percent: {int(percent_complete)}%, Test eras batch: {_format_ranges(eras_batch)}")
 
             # Filter test data and targets for the current batch of eras
             test_data_batch = X_test[X_test[self.era_column].isin(eras_batch)]
@@ -174,7 +167,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 for model_name, model_attrs in self.models.items():
                     # Load or train the base model
                     model = self._load_model(model_attrs['model_path'])
-                    cache_id = [train_data.shape, sorted(train_data.columns.tolist()), model_name, self.purge_eras, model_attrs]
+                    cache_id = [train_data.shape, sorted(train_data.columns.tolist()), model_name, self.purge_eras, model_attrs, eras_to_test, X_test.shape]
                     cache_hash = get_cache_hash(cache_id)
                     model_path = f"{self.cache_dir}/{model_name}_{cache_hash}_model.pkl"
                     predictions_path = f"{self.cache_dir}/{model_name}_{cache_hash}_predictions.pkl"
@@ -288,7 +281,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
                 for model_name, model_attrs in self.models.items():
                     # Train or load models for the current era
-                    cache_id = [train_data.shape, sorted(train_data.columns.tolist()), model_name, self.purge_eras, model_attrs]
+                    cache_id = [train_data.shape, sorted(train_data.columns.tolist()), model_name, self.purge_eras, model_attrs, test_data_batch.shape]
                     cache_hash = get_cache_hash(cache_id)
                     era_model_name = f"{model_name}_{eras_batch[-1]}"
                     trained_model_name = f"{era_model_name}_{cache_hash}"
