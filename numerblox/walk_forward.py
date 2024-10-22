@@ -2,7 +2,7 @@ import os
 import pickle
 import pandas as pd
 import numpy as np
-from sklearn.base import BaseEstimator, RegressorMixin, clone
+from sklearn.base import BaseEstimator, RegressorMixin
 from tqdm import tqdm
 from numerblox.evaluation import NumeraiClassicEvaluator
 from numerblox.misc import get_cache_hash
@@ -13,6 +13,7 @@ from io import BytesIO
 import re
 import logging
 import math
+import copy
 
 
 def _check_sklearn_compatibility(model):
@@ -341,7 +342,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
                                     if not model_path:
                                         raise ValueError(f"No trained model path found for base model {col}")
 
-                                meta_model = clone(self.meta)
+                                meta_model = copy.deepcopy(self.meta)
+
                                 meta_model_name = f"meta_model_{window_size}"
                                 cache_id = [train_data.shape, sorted(train_data.columns.tolist()), window_eras, window_size,
                                             available_eras, eras_batch, self.purge_eras, self.models, meta_model_name, meta_data,
@@ -360,6 +362,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
                                     if meta_data is not None:
                                         oof_meta_data = meta_data.reindex(window_oof_data.index)
+                                        if meta_data.isna().any():
+                                            raise Exception(f"Meta data not available for historical window")
 
                                     meta_model.fit(
                                         window_oof_data,

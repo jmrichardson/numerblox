@@ -201,38 +201,14 @@ def mmc_score(
     sample_weight: pd.Series = None,
 ) -> float:
 
-    DEFAULT_MAX_FILTERED_INDEX_RATIO = 0.2
-
-    eras = eras.reindex(predictions.index)
-
-    # Step 1: Filter and sort indices to match
-    ids = meta_data.dropna().index.intersection(predictions.dropna().index)
-    assert len(ids) / len(meta_data) >= (1 - DEFAULT_MAX_FILTERED_INDEX_RATIO), (
-        "meta_data does not have enough overlapping ids with predictions,"
-        f" must have >= {round(1 - DEFAULT_MAX_FILTERED_INDEX_RATIO, 2) * 100}% overlapping ids"
-    )
-    assert len(ids) / len(predictions) >= (1 - DEFAULT_MAX_FILTERED_INDEX_RATIO), (
-        "predictions do not have enough overlapping ids with meta_data,"
-        f" must have >= {round(1 - DEFAULT_MAX_FILTERED_INDEX_RATIO, 2) * 100}% overlapping ids"
-    )
-    meta_data = meta_data.loc[ids].sort_index()
-    predictions = predictions.loc[ids].sort_index()
-
-    ids = targets.dropna().index.intersection(predictions.index)
-    assert len(ids) / len(targets) >= (1 - DEFAULT_MAX_FILTERED_INDEX_RATIO), (
-        "targets do not have enough overlapping ids with predictions,"
-        f" must have >= {round(1 - DEFAULT_MAX_FILTERED_INDEX_RATIO, 2) * 100}% overlapping ids"
-    )
-    targets = targets.loc[ids].sort_index()
-    predictions = predictions.loc[ids].sort_index()
-    meta_data = meta_data.loc[ids].sort_index()
-
-    if sample_weight is not None:
-        ids = sample_weight.dropna().index.intersection(predictions.index)
-        sample_weight = sample_weight.loc[ids].sort_index()
-        predictions = predictions.loc[ids].sort_index()
-        targets = targets.loc[ids].sort_index()
-        meta_data = meta_data.loc[ids].sort_index()
+    # # Align all indices to target
+    # targets = targets.sort_index()
+    # predictions = predictions.loc[targets.index].sort_index()
+    # eras = eras.loc[targets.index].sort_index()
+    # meta_data = meta_data.loc[targets.index].sort_index()
+    #
+    # if sample_weight is not None:
+    #     sample_weight = sample_weight.loc[targets.index].sort_index()
 
     # Step 2: Rank and gaussianize predictions and meta_data
     predictions_ranked = (predictions.rank(method="average") - 0.5) / predictions.count()
@@ -245,12 +221,9 @@ def mmc_score(
     meta_data_gaussianized = stats.norm.ppf(meta_data_ranked)
 
     # Step 3: Orthogonalize predictions with respect to meta_data
-    p = predictions_gaussianized.values
-    m = meta_data_gaussianized.values
-
-    m_dot_m = np.dot(m.T, m)
-    projection = np.dot(p.T, m) / m_dot_m
-    neutral_preds = p - m * projection
+    m_dot_m = np.dot(meta_data_gaussianized.T, meta_data_gaussianized)
+    projection = np.dot(predictions_gaussianized.T, meta_data_gaussianized) / m_dot_m
+    neutral_preds = predictions_gaussianized - meta_data_gaussianized * projection
 
     # Step 4: Adjust targets
     if (targets >= 0).all() and (targets <= 1).all():
@@ -294,11 +267,9 @@ def numerai_payout_score(targets: pd.Series,
                   eras,
                   meta_data: pd.Series,
                   sample_weight: pd.Series = None):
-    numerai_corr = numerai_corr_weighted(targets, predictions, eras, meta_data, sample_weight)
-    mmc = mmc_weighted(targets, predictions, eras, meta_data, sample_weight)
-
+    numerai_corr = numerai_corr_score(targets, predictions, eras, meta_data, sample_weight)
+    mmc = mmc_score(targets, predictions, eras, meta_data, sample_weight)
     score = numerai_corr * 0.5 + mmc * 2
-
     return score
 
 

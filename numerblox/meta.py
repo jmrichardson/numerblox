@@ -306,8 +306,9 @@ class MetaModel(BaseEstimator, RegressorMixin):
         The weights assigned to each base model in the ensemble.
     """
 
-    def __init__(self, meta_eras, max_ensemble_size: int = 7, random_state: int = 42, weight_factor: float = None):
+    def __init__(self, meta_eras, max_ensemble_size: int = 7, random_state: int = 42, weight_factor: float = None, metric='corr'):
         self.meta_eras = meta_eras  # Lookback periods for era-based model selection
+        self.metric = metric
         self.max_ensemble_size = max_ensemble_size
         self.random_state = random_state
         self.selected_model_names = []  # List to store the names of selected models
@@ -329,9 +330,9 @@ class MetaModel(BaseEstimator, RegressorMixin):
         else:
             sample_weights = None
 
-        # If ensemble_method is passed as a class, instantiate it
+        # Instantiate ensemble
         if isinstance(ensemble_method, type):
-            ensemble_method = ensemble_method(max_ensemble_size=self.max_ensemble_size, random_state=self.random_state)
+            ensemble_method = ensemble_method(max_ensemble_size=self.max_ensemble_size, metric=self.metric, random_state=self.random_state)
 
         oof = oof_data.dropna(subset=['target']).copy()
 
@@ -361,12 +362,11 @@ class MetaModel(BaseEstimator, RegressorMixin):
             models.append(model)
 
         # Create the VotingRegressor with the selected models and their corresponding weights
-
         self.ensemble_model = VotingRegressor(estimators=estimators_list, weights=weights_list)
         self.ensemble_model.estimators_ = models
         # self.ensemble_model.fit(X, y)  # Dont need a dummy fit because of estimators_ above
 
-        return self  # Return the fitted meta-model instance
+        return self
 
     def predict(self, X: pd.DataFrame) -> pd.Series:
         # Use the ensemble model to predict and return the results as a pandas Series

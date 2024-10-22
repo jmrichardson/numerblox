@@ -217,10 +217,10 @@ class GreedyEnsemble:
                 self.metric = numerai_corr_score
             elif metric == "mmc":
                 self.metric = mmc_score
-            elif metric == "score":
+            elif metric == "payout":
                 self.metric = numerai_payout_score
             else:
-                raise ValueError("Unsupported metric string. Choose 'corr', 'mmc', or 'score'.")
+                raise ValueError("Unsupported metric string. Choose 'corr', 'mmc', or 'payout'.")
         elif callable(metric):
             self.metric = metric
         else:
