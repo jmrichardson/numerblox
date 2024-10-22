@@ -362,9 +362,17 @@ class WalkForward(BaseEstimator, RegressorMixin):
                                     if not model_path:
                                         raise ValueError(f"No trained model path found for base model {col}")
 
+                                # All oof data must have target values and aligned
+                                window_oof_data = window_oof_data.dropna(subset=['target']).copy()
+                                if meta_data is not None:
+                                    oof_meta_data = meta_data.reindex(window_oof_data.index)
+                                    if meta_data.isna().any():
+                                        raise Exception(f"Meta data not available for historical window")
+
                                 meta_model = copy.deepcopy(self.meta)
                                 meta_model_name = f"meta_model_{window_size}"
-                                cache_id = [train_data.shape, sorted(train_data.columns.tolist()), window_eras, window_size, available_eras, eras_batch, self.purge_eras, self.models, meta_model_name, meta_data, meta_model.meta_eras, meta_model.max_ensemble_size, meta_model.weight_factor]
+                                cache_id = [train_data.shape, sorted(train_data.columns.tolist()), window_eras, window_size, available_eras, eras_batch, self.purge_eras, self.models,
+                                            meta_model_name, oof_meta_data, meta_model.meta_eras, meta_model.max_ensemble_size, meta_model.weight_factor, meta_model.metric]
                                 cache_hash = get_cache_hash(cache_id)
                                 trained_meta_model_name = f"{meta_model_name}_{eras_batch[-1]}_{cache_hash}"
                                 model_path = os.path.join(self.era_models_dir, f"{trained_meta_model_name}.pkl")
@@ -377,12 +385,6 @@ class WalkForward(BaseEstimator, RegressorMixin):
                                         meta_model = pickle.load(f)
                                 else:
                                     self.logger.info(f"Meta {meta_model_name}: OOS Eras: {_format_ranges(window_oof_data.era.unique())}, Num OOS eras: {len(window_oof_data.era.unique())}")
-
-                                    if meta_data is not None:
-                                        oof_meta_data = meta_data.reindex(window_oof_data.index)
-                                        if meta_data.isna().any():
-                                            raise Exception(f"Meta data not available for historical window")
-
                                     meta_model.fit(window_oof_data, model_name_to_path, oof_meta_data)
                                     with open(model_path, 'wb') as f:
                                         pickle.dump(meta_model, f)
