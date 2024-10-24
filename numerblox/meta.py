@@ -337,7 +337,9 @@ class MetaModel(BaseEstimator, RegressorMixin):
         oof = oof_data.dropna(subset=['target']).copy()
 
         # Fit the ensemble method with base model predictions, true targets, and sample weights
+        print("Start meta fit")
         ensemble_method.fit(oof, meta_data=meta_data, sample_weights=sample_weights)
+        print("End meta fit")
 
         # Get the names of the selected models and their weights
         self.selected_model_names = ensemble_method.selected_model_names_
@@ -346,6 +348,7 @@ class MetaModel(BaseEstimator, RegressorMixin):
         # Load the selected models from disk
         self.selected_models = []
         for model_name in self.selected_model_names:
+            print(f"meta {model_name}")
             model_path = model_name_to_path[model_name]  # Get the path of the model
             with open(model_path, 'rb') as f:
                 model = pickle.load(f)  # Load the model from the file
@@ -356,6 +359,7 @@ class MetaModel(BaseEstimator, RegressorMixin):
         estimators_list = []
         models = []
         for model_name, model in self.selected_models:
+            print(f"meta2 {model_name}")
             weight = self.weights_.loc[model_name]  # Get the weight for the model
             weights_list.append(weight)  # Add the weight to the list
             estimators_list.append((model_name, model))  # Add the model and its name to the list
