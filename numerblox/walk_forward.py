@@ -364,6 +364,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
                                 # All oof data must have target values and aligned
                                 window_oof_data = window_oof_data.dropna(subset=['target']).copy()
+                                oof_meta_data = None
                                 if meta_data is not None:
                                     oof_meta_data = meta_data.reindex(window_oof_data.index)
                                     if meta_data.isna().any():
