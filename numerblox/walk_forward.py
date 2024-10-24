@@ -305,7 +305,9 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
                         fit_kwargs = {k: v for k, v in fit_kwargs.items() if v is not None}
                         self.logger.info(f"Train model: {era_model_name}, Train eras: {_format_ranges(train_data.era.unique())}, Num eras: {len(train_data.era.unique())}")
+
                         model.fit(train_data.drop(columns=[self.era_column]), train_targets, **fit_kwargs)
+
                         self._save_model(model, trained_model_name)
                         self.latest_trained_model_paths[model_name] = model_path
 
@@ -416,9 +418,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
                 # Evaluate the predictions per step if the flag is enabled
                 if self.evaluate_per_step:
-                    self.oof_data = pd.concat(self.oof_dfs).groupby(level=0).first().sort_values(by='era')
-                    self.predictions = predictions
                     self.logger.info(f"Evaluating predictions, Eras: {_format_ranges(range(start_test_era, max(eras_batch) + 1))}, Artifacts: {self.artifacts_dir}")
+                    self.oof_data = pd.concat(self.oof_dfs).groupby(level=0).first().sort_values(by='era')
+                    print("done")
+                    self.predictions = predictions
+                    print("start evaluate")
                     self.evaluate(X_test, y_test)
 
             # Move to the next step of eras
