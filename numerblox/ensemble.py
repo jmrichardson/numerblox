@@ -252,7 +252,9 @@ class GreedyEnsemble:
             model_scores = {}
             for model_name in model_names:
                 predictions = oof_predictions[model_name]
+                print("yo start")
                 score = self.metric(oof_targets, predictions, oof_eras, meta_data=meta_data, sample_weight=sample_weights)
+                print("yo endstart")
                 model_scores[model_name] = score
             sorted_models = sorted(model_scores.items(), key=lambda x: x[1], reverse=True)
             if self.initial_n is None:
@@ -283,7 +285,9 @@ class GreedyEnsemble:
                 combined_predictions = (current_ensemble_predictions * len(ensemble_indices) + model_predictions) / (
                         len(ensemble_indices) + 1)
 
+                print("start metric")
                 score = self.metric(oof_targets, combined_predictions, oof_eras, meta_data=meta_data, sample_weight=sample_weights)
+                print("end metric")
 
                 if best_score is None or score > best_score:
                     best_score = score
