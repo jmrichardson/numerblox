@@ -419,6 +419,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                 # Evaluate the predictions per step if the flag is enabled
                 if self.evaluate_per_step:
                     self.logger.info(f"Evaluating predictions, Eras: {_format_ranges(range(start_test_era, max(eras_batch) + 1))}, Artifacts: {self.artifacts_dir}")
+                    print("start")
                     self.oof_data = pd.concat(self.oof_dfs).groupby(level=0).first().sort_values(by='era')
                     print("done")
                     self.predictions = predictions
