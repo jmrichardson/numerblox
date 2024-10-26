@@ -14,6 +14,7 @@ import re
 import logging
 import math
 import copy
+from . import logger
 
 
 def _check_sklearn_compatibility(model):
@@ -66,56 +67,23 @@ class WalkForward(BaseEstimator, RegressorMixin):
         os.makedirs(self.cache_dir, exist_ok=True)
         os.makedirs(self.artifacts_dir, exist_ok=True)
 
-        self.evaluation_results = None
-        self.predictions = None
-        self.per_era_numerai_corr = None
-        self.meta_weights = {}
-
-        if not os.path.exists(self.log_dir):
-            os.makedirs(self.log_dir)
-
-        self.logger = logging.getLogger('logger')
-        self.logger.setLevel(logging.DEBUG)  # Set the minimum logging level
-
-        # Create handlers
-        console_handler = logging.StreamHandler()  # Log to console
-
-        # Get the current date and time
-        log_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-
-        # Log file name with date and time
-        file_handler = logging.FileHandler(f'{self.log_dir}/walk_forward_{log_time}.log')
-
-        # Set log level for each handler
-        console_handler.setLevel(logging.INFO)  # Console will handle INFO and above
-        file_handler.setLevel(logging.INFO)  # File will also handle INFO and above
-
-        # Create a formatter and set it for both handlers
-        #formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        formatter = logging.Formatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-        console_handler.setFormatter(formatter)
-        file_handler.setFormatter(formatter)
-
-        # Add handlers to the logger
-        self.logger.addHandler(console_handler)
-        self.logger.addHandler(file_handler)
 
     def fit(self, X_train, y_train, X_test, y_test, meta_data=None):
         # Validate the provided data
         self.validate_arguments(X_train, y_train, X_test, y_test)
-        self.logger.info("Starting walk forward")
+        logger.info("Starting walk forward")
 
         # Get unique train eras and log the details
         unique_train_eras = X_train[self.era_column].unique()
         start_train_era = min(unique_train_eras)
         end_train_era = max(unique_train_eras)
-        self.logger.info(f"Train data: Rows: {X_train.shape[0]}, Cols: {X_train.shape[1]}, Eras: {len(unique_train_eras)}, Start era: {start_train_era}, End era: {end_train_era}")
+        logger.info(f"Train data: Rows: {X_train.shape[0]}, Cols: {X_train.shape[1]}, Eras: {len(unique_train_eras)}, Start era: {start_train_era}, End era: {end_train_era}")
 
         # Get unique test eras and log the details
         unique_test_eras = X_test[self.era_column].unique()
         start_test_era = min(unique_test_eras)
         end_test_era = max(unique_test_eras)
-        self.logger.info(f"Test data: Rows: {X_test.shape[0]}, Cols: {X_test.shape[1]}, Eras: {len(unique_test_eras)}, Start era: {start_test_era}, End era: {end_test_era}")
+        logger.info(f"Test data: Rows: {X_test.shape[0]}, Cols: {X_test.shape[1]}, Eras: {len(unique_test_eras)}, Start era: {start_test_era}, End era: {end_test_era}")
 
         # Ensure era columns are integers and sort train and test data by era
         X_train[self.era_column] = X_train[self.era_column].astype(int)
@@ -143,8 +111,8 @@ class WalkForward(BaseEstimator, RegressorMixin):
         oof_pre = []
 
         # Log details about the purge period and base models
-        self.logger.info(f"Purge eras: {self.purge_eras}, Test prediction eras after purge: {_format_ranges(eras_to_test)}")
-        self.logger.info(f"Base Models: {len(self.models)}")
+        logger.info(f"Purge eras: {self.purge_eras}, Test prediction eras after purge: {_format_ranges(eras_to_test)}")
+        logger.info(f"Base Models: {len(self.models)}")
 
         i = 0
         num_eras_to_test = len(eras_to_test)
@@ -156,7 +124,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
             eras_batch = eras_to_test[i:i + self.step_eras]
             current_iteration = (i // self.step_eras) + 1
             percent_complete = (current_iteration / total_iterations) * 100
-            self.logger.info(f"Iteration {current_iteration} of {total_iterations}, Step: {self.step_eras}, Percent: {int(percent_complete)}%, Test eras batch: {_format_ranges(eras_batch)}")
+            logger.info(f"Iteration {current_iteration} of {total_iterations}, Step: {self.step_eras}, Percent: {int(percent_complete)}%, Test eras batch: {_format_ranges(eras_batch)}")
 
             # Filter test data and targets for the current batch of eras
             test_data_batch = X_test[X_test[self.era_column].isin(eras_batch)]
@@ -174,7 +142,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
                     # Load model from cache if available
                     if os.path.exists(model_path):
-                        self.logger.info(f"Load base model cache: {model_name}, Train eras: {_format_ranges(train_data.era.unique())}, Num eras: {len(train_data.era.unique())}")
+                        logger.info(f"Load base model cache: {model_name}, Train eras: {_format_ranges(train_data.era.unique())}, Num eras: {len(train_data.era.unique())}")
                         with open(model_path, 'rb') as f:
                             model = pickle.load(f)
                         self.latest_trained_model_paths[f"{model_name}_base"] = model_path
@@ -188,7 +156,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                             fit_kwargs['sample_weight'] = train_weights.values
                         fit_kwargs = {k: v for k, v in fit_kwargs.items() if v is not None}
 
-                        self.logger.info(f"Train base model: {model_name}, Train eras: {_format_ranges(train_data.era.unique())}, Num eras: {len(train_data.era.unique())}")
+                        logger.info(f"Train base model: {model_name}, Train eras: {_format_ranges(train_data.era.unique())}, Num eras: {len(train_data.era.unique())}")
                         model.fit(train_data.drop(columns=[self.era_column]), train_targets, **fit_kwargs)
                         self.latest_trained_model_paths[f"{model_name}_base"] = model_path
                         with open(model_path, 'wb') as f:
@@ -197,11 +165,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
                     # Generate predictions for all test eras
                     test_data_filtered = X_test[X_test[self.era_column].isin(eras_to_test)]
                     if os.path.exists(predictions_path):
-                        self.logger.info(f"Load base model predictions cache: {model_name}, Prediction eras: {_format_ranges(test_data_filtered.era.unique())}, Num eras: {len(test_data_filtered.era.unique())}")
+                        logger.info(f"Load base model predictions cache: {model_name}, Prediction eras: {_format_ranges(test_data_filtered.era.unique())}, Num eras: {len(test_data_filtered.era.unique())}")
                         with open(predictions_path, 'rb') as f:
                             predictions_filtered = pickle.load(f)
                     else:
-                        self.logger.info(f"Predict base model: {model_name}, Prediction eras: {_format_ranges(test_data_filtered.era.unique())}, Num eras: {len(test_data_filtered.era.unique())}")
+                        logger.info(f"Predict base model: {model_name}, Prediction eras: {_format_ranges(test_data_filtered.era.unique())}, Num eras: {len(test_data_filtered.era.unique())}")
                         predictions_filtered = model.predict(test_data_filtered.drop(columns=[self.era_column]))
                         with open(predictions_path, 'wb') as f:
                             pickle.dump(predictions_filtered, f)
@@ -289,7 +257,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                     predictions_path = os.path.join(f"{self.cache_dir}/{trained_model_name}_predictions.pkl")
 
                     if os.path.exists(model_path):
-                        self.logger.info(f"Load model cache: {era_model_name}, Train eras: {_format_ranges(train_data.era.unique())}, Num eras: {len(train_data.era.unique())}")
+                        logger.info(f"Load model cache: {era_model_name}, Train eras: {_format_ranges(train_data.era.unique())}, Num eras: {len(train_data.era.unique())}")
                         with open(model_path, 'rb') as f:
                             model = pickle.load(f)
                         self.latest_trained_model_paths[model_name] = model_path
@@ -304,7 +272,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
                             fit_kwargs['sample_weight'] = train_weights.values
 
                         fit_kwargs = {k: v for k, v in fit_kwargs.items() if v is not None}
-                        self.logger.info(f"Train model: {era_model_name}, Train eras: {_format_ranges(train_data.era.unique())}, Num eras: {len(train_data.era.unique())}")
+                        logger.info(f"Train model: {era_model_name}, Train eras: {_format_ranges(train_data.era.unique())}, Num eras: {len(train_data.era.unique())}")
 
                         model.fit(train_data.drop(columns=[self.era_column]), train_targets, **fit_kwargs)
 
@@ -313,11 +281,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
                     # Generate predictions for the current test batch
                     if os.path.exists(predictions_path):
-                        self.logger.info(f"Load model predictions cache: {era_model_name}, Prediction eras: {_format_ranges(test_data_batch.era.unique())}, Num eras: {len(test_data_batch.era.unique())}")
+                        logger.info(f"Load model predictions cache: {era_model_name}, Prediction eras: {_format_ranges(test_data_batch.era.unique())}, Num eras: {len(test_data_batch.era.unique())}")
                         with open(predictions_path, 'rb') as f:
                             test_predictions = pickle.load(f)
                     else:
-                        self.logger.info(f"Predict model: {era_model_name}, Prediction eras: {_format_ranges(test_data_batch.era.unique())}, Num eras: {len(test_data_batch.era.unique())}")
+                        logger.info(f"Predict model: {era_model_name}, Prediction eras: {_format_ranges(test_data_batch.era.unique())}, Num eras: {len(test_data_batch.era.unique())}")
                         test_predictions = pd.Series(model.predict(test_data_batch.drop(columns=[self.era_column])), index=test_data_batch.index, name=model_name)
                         with open(predictions_path, 'wb') as f:
                             pickle.dump(test_predictions, f)
@@ -383,11 +351,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
                                 # Load or train the meta model
                                 if os.path.exists(model_path):
-                                    self.logger.info(f"Load meta cache {meta_model_name}: OOS Eras: {_format_ranges(window_oof_data.era.unique())}, Num OOS eras: {len(window_oof_data.era.unique())}")
+                                    logger.info(f"Load meta cache {meta_model_name}: OOS Eras: {_format_ranges(window_oof_data.era.unique())}, Num OOS eras: {len(window_oof_data.era.unique())}")
                                     with open(model_path, 'rb') as f:
                                         meta_model = pickle.load(f)
                                 else:
-                                    self.logger.info(f"Meta {meta_model_name}: OOS Eras: {_format_ranges(window_oof_data.era.unique())}, Num OOS eras: {len(window_oof_data.era.unique())}")
+                                    logger.info(f"Meta {meta_model_name}: OOS Eras: {_format_ranges(window_oof_data.era.unique())}, Num OOS eras: {len(window_oof_data.era.unique())}")
                                     meta_model.fit(window_oof_data, model_name_to_path, oof_meta_data)
                                     with open(model_path, 'wb') as f:
                                         pickle.dump(meta_model, f)
@@ -398,11 +366,11 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
                                 # Generate meta model predictions
                                 if os.path.exists(predictions_path):
-                                    self.logger.info(f"Load meta predictions cache: {meta_model_name}, Prediction eras: {_format_ranges(test_data_batch.era.unique())}, Num eras: {len(test_data_batch.era.unique())}")
+                                    logger.info(f"Load meta predictions cache: {meta_model_name}, Prediction eras: {_format_ranges(test_data_batch.era.unique())}, Num eras: {len(test_data_batch.era.unique())}")
                                     with open(predictions_path, 'rb') as f:
                                         meta_predictions = pickle.load(f)
                                 else:
-                                    self.logger.info(f"Predict meta: {meta_model_name}, Prediction eras: {_format_ranges(test_data_batch.era.unique())}, Num eras: {len(test_data_batch.era.unique())}")
+                                    logger.info(f"Predict meta: {meta_model_name}, Prediction eras: {_format_ranges(test_data_batch.era.unique())}, Num eras: {len(test_data_batch.era.unique())}")
                                     meta_predictions = meta_model.predict(test_data_batch.drop(columns=[self.era_column]))
                                     with open(predictions_path, 'wb') as f:
                                         pickle.dump(meta_predictions, f)
@@ -418,7 +386,7 @@ class WalkForward(BaseEstimator, RegressorMixin):
 
                 # Evaluate the predictions per step if the flag is enabled
                 if self.evaluate_per_step:
-                    self.logger.info(f"Evaluating predictions, Eras: {_format_ranges(range(start_test_era, max(eras_batch) + 1))}, Artifacts: {self.artifacts_dir}")
+                    logger.info(f"Evaluating predictions, Eras: {_format_ranges(range(start_test_era, max(eras_batch) + 1))}, Artifacts: {self.artifacts_dir}")
                     print("start")
                     self.oof_data = pd.concat(self.oof_dfs).groupby(level=0).first().sort_values(by='era')
                     print("done")
@@ -438,20 +406,20 @@ class WalkForward(BaseEstimator, RegressorMixin):
                     model = self._load_model(model_path)
                     final_model_name = f"{model_name}"
                     self._save_model(model, final_model_name, is_final=True)
-                    self.logger.info(f"Final trained model: {model_path} to {self.final_models_dir}/{final_model_name}")
+                    logger.info(f"Final trained model: {model_path} to {self.final_models_dir}/{final_model_name}")
 
             if self.meta is not None:
                 for window_size, meta_model_path in self.latest_trained_meta_model_paths.items():
                     meta_model = self._load_model(meta_model_path)
                     final_meta_model_name = f"meta_model_{window_size}"
                     self._save_model(meta_model, final_meta_model_name, is_final=True)
-                    self.logger.info(f"Final meta-model: {self.final_models_dir}/{final_meta_model_name}")
+                    logger.info(f"Final meta-model: {self.final_models_dir}/{final_meta_model_name}")
 
         # Evaluate the final predictions if evaluation was not done per step
         if self.evaluate_per_step is False:
             self.oof_data = pd.concat(self.oof_dfs).groupby(level=0).first().sort_values(by='era')
             self.predictions = predictions
-            self.logger.info(f"Evaluating predictions, Eras: {_format_ranges(range(start_test_era, max(eras_batch) + 1))}, Artifacts: {self.artifacts_dir}")
+            logger.info(f"Evaluating predictions, Eras: {_format_ranges(range(start_test_era, max(eras_batch) + 1))}, Artifacts: {self.artifacts_dir}")
             self.evaluate(X_test, y_test)
 
         return self
