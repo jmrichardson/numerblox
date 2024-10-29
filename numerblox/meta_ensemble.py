@@ -225,8 +225,10 @@ class GreedyEnsemble:
         # Initialize ensemble predictions and other variables
         current_ensemble_predictions = pd.Series(0.0, index=oof.index)
         ensemble_indices = []
-        ensemble_scores = []
         used_model_counts = Counter()
+
+        # Initialize ensemble_scores list
+        ensemble_scores = []
 
         # Sorted initialization
         if self.sorted_initialization:
@@ -260,8 +262,22 @@ class GreedyEnsemble:
                 used_model_counts[model_name] += 1
             current_ensemble_predictions /= N
 
+            # Compute initial ensemble score
+            initial_score = self.metric(
+                oof_targets,
+                current_ensemble_predictions,
+                oof_eras,
+                meta_data=meta_data,
+                sample_weight=sample_weights
+            )
+            ensemble_scores.append(initial_score)
+            logger.info(f"Initial ensemble score with {N} models: {initial_score}")
+        else:
+            # Initialize empty ensemble_scores if no sorted initialization
+            ensemble_scores = []
+
         # Greedy addition of models to the ensemble
-        for _ in range(self.max_ensemble_size):
+        for iteration in range(self.max_ensemble_size - len(ensemble_indices)):
             best_score = None
             best_model_name = None
 
@@ -281,7 +297,7 @@ class GreedyEnsemble:
                     current_ensemble_predictions * len(ensemble_indices) + model_predictions
                 ) / (len(ensemble_indices) + 1)
 
-                logger.info(f"Calculating candidate model metric - Model: {model_name}")
+                # Calculate the score of the new ensemble
                 score = self.metric(
                     oof_targets,
                     combined_predictions,
@@ -304,12 +320,16 @@ class GreedyEnsemble:
                 current_ensemble_predictions * (len(ensemble_indices) - 1) +
                 oof_predictions[best_model_name]
             ) / len(ensemble_indices)
+
             ensemble_scores.append(best_score)
+
+            logger.info(f"Iteration {iteration + 1}: Added model '{best_model_name}' with score {best_score}. Ensemble size: {len(ensemble_indices)}")
 
         # Select the best ensemble size based on the highest score
         if ensemble_scores:
             best_index = np.argmax(ensemble_scores)
             best_ensemble_indices = ensemble_indices[:best_index + 1]
+            logger.info(f"Best ensemble size: {best_index + 1} with score {ensemble_scores[best_index]}")
         else:
             best_ensemble_indices = []
 
