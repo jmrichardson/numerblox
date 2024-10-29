@@ -331,7 +331,7 @@ class GreedyEnsemble:
             ensemble_scores.append(best_score)
             ensemble_sizes.append(len(ensemble_indices))
 
-            logger.info(f"Iteration {len(ensemble_sizes)}: Added model '{best_model_name}' with score {best_score}. Ensemble size: {len(ensemble_indices)}")
+            logger.info(f"Iteration {len(ensemble_sizes)}: Added model '{best_model_name}' with score {best_score}. Bag ensemble size: {len(ensemble_indices)}")
 
             if len(used_model_counts) >= self.max_ensemble_size and not self.use_replacement:
                 break  # Reached maximum number of unique models
@@ -343,7 +343,7 @@ class GreedyEnsemble:
             best_index = best_indices[-1]  # Pick the last occurrence
             best_ensemble_size = ensemble_sizes[best_index]
             best_ensemble_indices = ensemble_indices[:best_ensemble_size]
-            logger.info(f"Best ensemble size: {best_ensemble_size} with score {ensemble_scores[best_index]}")
+            logger.info(f"Best bagged ensemble size: {best_ensemble_size} with score {ensemble_scores[best_index]}")
         else:
             best_ensemble_indices = []
 
