@@ -171,13 +171,12 @@ def numerai_payout_score(
 class GreedyEnsemble:
     def __init__(
         self,
-        max_ensemble_size: int = 10,
+        max_ensemble_size: int = 10,  # Max number of unique models
         metric: Union[str, Callable] = "corr",
         use_replacement: bool = True,
         sorted_initialization: bool = True,
         initial_n: int = None,
-        bag_fraction: float = 0.5,
-        num_bags: int = 20,
+        num_bags: int = 50,  # Controls the ensemble size (number of models weighted)
         random_state: Union[int, None] = None
     ):
 
@@ -185,7 +184,6 @@ class GreedyEnsemble:
         self.use_replacement = use_replacement
         self.sorted_initialization = sorted_initialization
         self.initial_n = initial_n
-        self.bag_fraction = bag_fraction
         self.num_bags = num_bags
         self.random_state = random_state
 
@@ -220,15 +218,18 @@ class GreedyEnsemble:
         model_names = oof_predictions.columns.tolist()
 
         if self.max_ensemble_size < 1:
-            raise ValueError("Ensemble size cannot be less than one!")
+            raise ValueError("max_ensemble_size cannot be less than one!")
+        if self.num_bags < 1:
+            raise ValueError("num_bags cannot be less than one!")
 
         # Initialize ensemble predictions and other variables
         current_ensemble_predictions = pd.Series(0.0, index=oof.index)
         ensemble_indices = []
         used_model_counts = Counter()
 
-        # Initialize ensemble_scores list
+        # Initialize ensemble_scores and ensemble_sizes lists
         ensemble_scores = []
+        ensemble_sizes = []
 
         # Sorted initialization
         if self.sorted_initialization:
@@ -254,6 +255,7 @@ class GreedyEnsemble:
             else:
                 N = self.initial_n
 
+            N = min(N, self.max_ensemble_size)
             # Add the top N models to the ensemble
             for i in range(N):
                 model_name = sorted_models[i][0]
@@ -271,13 +273,18 @@ class GreedyEnsemble:
                 sample_weight=sample_weights
             )
             ensemble_scores.append(initial_score)
-            logger.info(f"Initial ensemble score with {N} models: {initial_score}")
+            ensemble_sizes.append(len(ensemble_indices))
+            logger.info(f"Initial ensemble score with {len(ensemble_indices)} models: {initial_score}")
         else:
-            # Initialize empty ensemble_scores if no sorted initialization
+            # Initialize empty ensemble_scores and ensemble_sizes if no sorted initialization
             ensemble_scores = []
+            ensemble_sizes = []
 
         # Greedy addition of models to the ensemble
-        for iteration in range(self.max_ensemble_size - len(ensemble_indices)):
+        while len(ensemble_indices) < self.num_bags:
+            if len(used_model_counts) >= self.max_ensemble_size and not self.use_replacement:
+                break  # Reached maximum number of unique models
+
             best_score = None
             best_model_name = None
 
@@ -322,14 +329,21 @@ class GreedyEnsemble:
             ) / len(ensemble_indices)
 
             ensemble_scores.append(best_score)
+            ensemble_sizes.append(len(ensemble_indices))
 
-            logger.info(f"Iteration {iteration + 1}: Added model '{best_model_name}' with score {best_score}. Ensemble size: {len(ensemble_indices)}")
+            logger.info(f"Iteration {len(ensemble_sizes)}: Added model '{best_model_name}' with score {best_score}. Ensemble size: {len(ensemble_indices)}")
+
+            if len(used_model_counts) >= self.max_ensemble_size and not self.use_replacement:
+                break  # Reached maximum number of unique models
 
         # Select the best ensemble size based on the highest score
         if ensemble_scores:
-            best_index = np.argmax(ensemble_scores)
-            best_ensemble_indices = ensemble_indices[:best_index + 1]
-            logger.info(f"Best ensemble size: {best_index + 1} with score {ensemble_scores[best_index]}")
+            max_score = max(ensemble_scores)
+            best_indices = [i for i, score in enumerate(ensemble_scores) if score == max_score]
+            best_index = best_indices[-1]  # Pick the last occurrence
+            best_ensemble_size = ensemble_sizes[best_index]
+            best_ensemble_indices = ensemble_indices[:best_ensemble_size]
+            logger.info(f"Best ensemble size: {best_ensemble_size} with score {ensemble_scores[best_index]}")
         else:
             best_ensemble_indices = []
 

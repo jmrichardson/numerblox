@@ -35,9 +35,10 @@ def get_sample_weights(data, wfactor=0.2, eras=None):
 
 
 class MetaModel(BaseEstimator, RegressorMixin):
-    def __init__(self, max_ensemble_size: int = 10, random_state: int = 42, weight_factor: float = None, metric='corr'):
+    def __init__(self, max_ensemble_size: int = 10, num_bags = 50, random_state: int = 42, weight_factor: float = None, metric='corr'):
         self.metric = metric
         self.max_ensemble_size = max_ensemble_size
+        self.num_bags = num_bags
         self.random_state = random_state
         self.weight_factor = weight_factor  # Weight factor used in sample weighting
         self.selected_model_names = []  # List to store the names of selected models
@@ -68,7 +69,7 @@ class MetaModel(BaseEstimator, RegressorMixin):
 
         # Instantiate ensemble
         if isinstance(ensemble_method, type):
-            ensemble_method = ensemble_method(max_ensemble_size=self.max_ensemble_size, metric=self.metric, random_state=self.random_state)
+            ensemble_method = ensemble_method(max_ensemble_size=self.max_ensemble_size, num_bags=self.num_bags, metric=self.metric, random_state=self.random_state)
 
         # Fit the ensemble method with base model predictions, true targets, and sample weights
         logger.info(f"Ensembling out of sample predictions - Metric: {self.metric}")
