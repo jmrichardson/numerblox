@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from collections import Counter
-from typing import Callable, List, Union
+from typing import Callable, Union
 from sklearn.utils import check_random_state
 from scipy import stats
 from . import logger
@@ -14,8 +14,10 @@ def numerai_corr_score(
     meta_data=None,
     sample_weight: pd.Series = None
 ) -> float:
-    # Align eras with the predictions' index if eras are provided
+    # Align eras and sample_weight with the predictions' index
     eras = eras.reindex(predictions.index)
+    if sample_weight is not None:
+        sample_weight = sample_weight.reindex(predictions.index)
 
     # Convert to numpy arrays for faster computations
     preds_filled = predictions.fillna(0.5).values
@@ -33,7 +35,7 @@ def numerai_corr_score(
     preds_p15 = np.sign(gauss_ranked_preds) * np.abs(gauss_ranked_preds) ** 1.5
     target_p15 = np.sign(centered_target) * np.abs(centered_target) ** 1.5
 
-    # If sample_weight is provided, apply it
+    # Apply sample weights if provided
     if sample_weight is not None:
         sample_weight_values = sample_weight.values
         weighted_preds = preds_p15 * sample_weight_values
@@ -79,7 +81,6 @@ def numerai_corr_score(
     return corr_result
 
 
-
 def mmc_score(
     targets: pd.Series,
     predictions: pd.Series,
@@ -87,6 +88,10 @@ def mmc_score(
     meta_data: pd.Series,
     sample_weight: pd.Series = None,
 ) -> float:
+    # Align sample_weight with targets
+    if sample_weight is not None:
+        sample_weight = sample_weight.reindex(targets.index)
+
     # Convert to numpy arrays for faster computations
     targets_arr = targets.values
     predictions_arr = predictions.values
@@ -150,11 +155,13 @@ def mmc_score(
     return mmc_score
 
 
-def numerai_payout_score(targets: pd.Series,
-                  predictions: pd.Series,
-                  eras,
-                  meta_data: pd.Series,
-                  sample_weight: pd.Series = None):
+def numerai_payout_score(
+    targets: pd.Series,
+    predictions: pd.Series,
+    eras: pd.Series,
+    meta_data: pd.Series,
+    sample_weight: pd.Series = None
+) -> float:
     numerai_corr = numerai_corr_score(targets, predictions, eras, meta_data, sample_weight)
     mmc = mmc_score(targets, predictions, eras, meta_data, sample_weight)
     score = numerai_corr * 0.5 + mmc * 2
@@ -162,15 +169,17 @@ def numerai_payout_score(targets: pd.Series,
 
 
 class GreedyEnsemble:
-    def __init__(self,
-                 max_ensemble_size: int = 10,
-                 metric: Union[str, Callable] = "corr",
-                 use_replacement: bool = True,
-                 sorted_initialization: bool = True,
-                 initial_n: int = None,
-                 bag_fraction: float = 0.5,
-                 num_bags: int = 20,
-                 random_state: Union[int, None] = None):
+    def __init__(
+        self,
+        max_ensemble_size: int = 10,
+        metric: Union[str, Callable] = "corr",
+        use_replacement: bool = True,
+        sorted_initialization: bool = True,
+        initial_n: int = None,
+        bag_fraction: float = 0.5,
+        num_bags: int = 20,
+        random_state: Union[int, None] = None
+    ):
 
         self.max_ensemble_size = max_ensemble_size
         self.use_replacement = use_replacement
@@ -197,38 +206,53 @@ class GreedyEnsemble:
         else:
             raise TypeError("Metric must be a string or a callable.")
 
-    def fit(self,
-            oof: pd.DataFrame,
-            sample_weights: pd.Series = None):
+    def fit(
+        self,
+        oof: pd.DataFrame,
+        sample_weights: pd.Series = None
+    ):
 
         rng = check_random_state(self.random_state)
-        oof_targets = oof.target
-        oof_eras = oof.era
+        oof_targets = oof['target']
+        oof_eras = oof['era']
         meta_data = oof.get('meta_data', None)
         oof_predictions = oof.drop(columns=['era', 'target', 'meta_data'], errors='ignore')
         model_names = oof_predictions.columns.tolist()
-        n_models = len(model_names)
 
         if self.max_ensemble_size < 1:
             raise ValueError("Ensemble size cannot be less than one!")
 
+        # Initialize ensemble predictions and other variables
         current_ensemble_predictions = pd.Series(0.0, index=oof.index)
         ensemble_indices = []
         ensemble_scores = []
         used_model_counts = Counter()
 
+        # Sorted initialization
         if self.sorted_initialization:
             model_scores = {}
             for model_name in model_names:
                 predictions = oof_predictions[model_name]
                 logger.info(f"Calculating initial sorted metric - Model: {model_name}")
-                score = self.metric(oof_targets, predictions, oof_eras, meta_data=meta_data, sample_weight=sample_weights)
+                score = self.metric(
+                    oof_targets,
+                    predictions,
+                    oof_eras,
+                    meta_data=meta_data,
+                    sample_weight=sample_weights
+                )
                 model_scores[model_name] = score
+
+            # Sort models by score in descending order
             sorted_models = sorted(model_scores.items(), key=lambda x: x[1], reverse=True)
+
+            # Determine the number of models to initialize
             if self.initial_n is None:
                 N = self._determine_initial_n([score for name, score in sorted_models])
             else:
                 N = self.initial_n
+
+            # Add the top N models to the ensemble
             for i in range(N):
                 model_name = sorted_models[i][0]
                 current_ensemble_predictions += oof_predictions[model_name]
@@ -236,60 +260,74 @@ class GreedyEnsemble:
                 used_model_counts[model_name] += 1
             current_ensemble_predictions /= N
 
+        # Greedy addition of models to the ensemble
         for _ in range(self.max_ensemble_size):
             best_score = None
             best_model_name = None
 
+            # Determine candidate models
             if self.use_replacement:
                 candidate_model_names = model_names
             else:
                 candidate_model_names = [name for name in model_names if name not in used_model_counts]
 
             if not candidate_model_names:
-                break
+                break  # No more candidates to consider
 
+            # Evaluate each candidate model
             for model_name in candidate_model_names:
                 model_predictions = oof_predictions[model_name]
-                combined_predictions = (current_ensemble_predictions * len(ensemble_indices) + model_predictions) / (
-                        len(ensemble_indices) + 1)
+                combined_predictions = (
+                    current_ensemble_predictions * len(ensemble_indices) + model_predictions
+                ) / (len(ensemble_indices) + 1)
 
                 logger.info(f"Calculating candidate model metric - Model: {model_name}")
-                score = self.metric(oof_targets, combined_predictions, oof_eras, meta_data=meta_data, sample_weight=sample_weights)
+                score = self.metric(
+                    oof_targets,
+                    combined_predictions,
+                    oof_eras,
+                    meta_data=meta_data,
+                    sample_weight=sample_weights
+                )
 
                 if best_score is None or score > best_score:
                     best_score = score
                     best_model_name = model_name
 
             if best_model_name is None:
-                break
+                break  # No improvement found
 
+            # Update ensemble with the best model
             ensemble_indices.append(best_model_name)
             used_model_counts[best_model_name] += 1
-            current_ensemble_predictions = (current_ensemble_predictions * (len(ensemble_indices) - 1) +
-                                            oof[best_model_name]) / len(ensemble_indices)
+            current_ensemble_predictions = (
+                current_ensemble_predictions * (len(ensemble_indices) - 1) +
+                oof_predictions[best_model_name]
+            ) / len(ensemble_indices)
             ensemble_scores.append(best_score)
 
+        # Select the best ensemble size based on the highest score
         if ensemble_scores:
             best_index = np.argmax(ensemble_scores)
             best_ensemble_indices = ensemble_indices[:best_index + 1]
         else:
             best_ensemble_indices = []
 
+        # Calculate the final weights
         model_counts = Counter(best_ensemble_indices)
         total_counts = sum(model_counts.values()) or 1
         weights = pd.Series({model_name: count / total_counts for model_name, count in model_counts.items()})
         self.weights_ = weights.reindex(model_names).fillna(0.0)
         self.selected_model_names_ = self.weights_[self.weights_ > 0].index.tolist()
 
-
     def _determine_initial_n(self, scores):
         if len(scores) <= 1:
             return 1
 
-        threshold = 0.001
+        threshold = 0.001  # You may adjust this threshold based on your needs
         N = 1
         for i in range(1, len(scores)):
-            improvement = scores[i] - scores[i - 1]
+            improvement = scores[i - 1] - scores[i]
             if improvement < threshold:
                 break
             N += 1
@@ -299,4 +337,3 @@ class GreedyEnsemble:
         weighted_predictions = base_models_predictions.multiply(self.weights_, axis=1)
         ensemble_predictions = weighted_predictions.sum(axis=1)
         return ensemble_predictions
-
