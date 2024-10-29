@@ -171,12 +171,12 @@ def numerai_payout_score(
 class GreedyEnsemble:
     def __init__(
         self,
-        max_ensemble_size: int = 10,  # Max number of unique models
+        max_ensemble_size: int = 10,
         metric: Union[str, Callable] = "corr",
         use_replacement: bool = True,
         sorted_initialization: bool = True,
         initial_n: int = None,
-        num_bags: int = 50,  # Controls the ensemble size (number of models weighted)
+        num_bags: int = 50,
         random_state: Union[int, None] = None
     ):
 
