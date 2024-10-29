@@ -4,73 +4,38 @@ from sklearn.ensemble import VotingRegressor
 import pickle
 from .meta_ensemble import GreedyEnsemble
 from . import logger
+import numpy as np
 
-def get_sample_weights(data, wfactor=.2, eras=None):
-    """
-    Calculate sample weights for the given data, optionally handling weights by era.
 
-    The weights are calculated using an exponential decay function, and if eras are provided
-    (or exist as a column in the data), the weights are averaged across each era.
+def get_sample_weights(data, wfactor=0.2, eras=None):
+    num_weights = len(data)
 
-    Parameters:
-    -----------
-    data : pandas.DataFrame
-        The dataset for which sample weights will be calculated.
-    wfactor : float, optional (default=0.2)
-        A weighting factor that controls the decay rate of the weights. The lower the value, the more
-        weight is concentrated on later entries in the data.
-    eras : pandas.Series, optional (default=None)
-        The era data to assign weights. If not provided, the function will attempt to use the 'era' column
-        from the data.
-
-    Returns:
-    --------
-    pandas.Series
-        A series of sample weights for each row in the input data.
-    """
-
-    data_copy = data.copy()  # Create a copy to avoid modifying the original data
-
-    num_weights = len(data_copy)
-
-    # First, calculate the weights as if we are not handling eras
+    # Calculate the weights as if we are not handling eras
     weights = np.exp(-np.arange(num_weights) / (wfactor * num_weights))[::-1]
     normalized_weights = weights * (num_weights / weights.sum())
 
-    if eras is None and 'era' in data_copy.columns:
+    if eras is None and 'era' in data.columns:
         # If eras is not supplied, try to get it from the data's "era" column
-        eras = data_copy['era']
+        eras = data['era']
 
     if eras is not None:
-        # Ensure eras are treated as string or categorical values
-        data_copy['era'] = eras.values
-        unique_eras = eras.unique()
+        # Create a DataFrame with 'era' and 'normalized_weights'
+        temp_df = pd.DataFrame({
+            'era': eras.values,
+            'normalized_weights': normalized_weights
+        }, index=data.index)
 
-        weights = np.zeros(num_weights)
-
-        # Apply the same average weight within each era
-        for era in unique_eras:
-            era_indices = data_copy[data_copy['era'] == era].index
-
-            # Convert era_indices to positional indices
-            pos_indices = data_copy.index.get_indexer(era_indices)
-
-            # Take the average of the calculated weights within the era
-            avg_weight = normalized_weights[pos_indices].mean()
-
-            # Assign the average weight to all the positions in the era
-            weights[pos_indices] = avg_weight
-
-        data_copy['sample_weight'] = weights
-        data_copy = data_copy.drop(columns=['era'])  # Drop the era column if added
+        # Compute the average weight per era
+        avg_weights_per_era = temp_df.groupby('era')['normalized_weights'].transform('mean')
+        sample_weights = avg_weights_per_era
     else:
-        data_copy['sample_weight'] = normalized_weights
+        sample_weights = pd.Series(normalized_weights, index=data.index)
 
-    return data_copy['sample_weight']
+    return sample_weights
 
 
 class MetaModel(BaseEstimator, RegressorMixin):
-    def __init__(self, max_ensemble_size: int = 7, random_state: int = 42, weight_factor: float = None, metric='corr'):
+    def __init__(self, max_ensemble_size: int = 10, random_state: int = 42, weight_factor: float = None, metric='corr'):
         self.metric = metric
         self.max_ensemble_size = max_ensemble_size
         self.random_state = random_state
@@ -97,7 +62,7 @@ class MetaModel(BaseEstimator, RegressorMixin):
         # If weight_factor is provided, calculate sample weights based on eras
         if self.weight_factor is not None:
             logger.info(f"Generating sample weights - Weight factor: {self.weight_factor}")
-            sample_weights = get_sample_weights(oos_model_predictions, wfactor=self.weight_factor, eras=oos_model_predictions.era)
+            sample_weights = get_sample_weights(oof.drop(columns=['era', 'target', 'meta_data'], errors='ignore'), wfactor=self.weight_factor, eras=oof.era)
         else:
             sample_weights = None
 
