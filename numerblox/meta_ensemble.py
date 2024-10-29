@@ -3,8 +3,162 @@ import pandas as pd
 from collections import Counter
 from typing import Callable, List, Union
 from sklearn.utils import check_random_state
-from .misc import numerai_payout_score, mmc_score, numerai_corr_score
+from scipy import stats
 from . import logger
+
+
+def numerai_corr_score(
+    targets: pd.Series,
+    predictions: pd.Series,
+    eras: pd.Series,
+    meta_data=None,
+    sample_weight: pd.Series = None
+) -> float:
+    # Align eras with the predictions' index if eras are provided
+    eras = eras.reindex(predictions.index)
+
+    # Convert to numpy arrays for faster computations
+    preds_filled = predictions.fillna(0.5).values
+    targets_values = targets.values
+
+    # Rank and gaussianize predictions using scipy's rankdata
+    ranked_preds = stats.rankdata(preds_filled, method='average') / len(preds_filled)
+    gauss_ranked_preds = stats.norm.ppf(ranked_preds)
+
+    # Center target to zero mean
+    target_mean = targets_values.mean()
+    centered_target = targets_values - target_mean
+
+    # Accentuate tails of predictions and targets
+    preds_p15 = np.sign(gauss_ranked_preds) * np.abs(gauss_ranked_preds) ** 1.5
+    target_p15 = np.sign(centered_target) * np.abs(centered_target) ** 1.5
+
+    # If sample_weight is provided, apply it
+    if sample_weight is not None:
+        sample_weight_values = sample_weight.values
+        weighted_preds = preds_p15 * sample_weight_values
+        weighted_target = target_p15 * sample_weight_values
+    else:
+        weighted_preds = preds_p15
+        weighted_target = target_p15
+
+    # Remove inf and NaN values from weighted_preds and weighted_target
+    valid_mask = np.isfinite(weighted_preds) & np.isfinite(weighted_target)
+    weighted_preds = weighted_preds[valid_mask]
+    weighted_target = weighted_target[valid_mask]
+    valid_eras = eras[valid_mask] if eras is not None else None
+
+    # Initialize correlation result as NaN
+    corr_result = np.nan
+
+    if valid_eras is not None:
+        df = pd.DataFrame({
+            'weighted_preds': weighted_preds,
+            'weighted_target': weighted_target,
+            'eras': valid_eras
+        })
+
+        # Filter out eras with less than 2 samples
+        era_counts = df['eras'].value_counts()
+        valid_eras_list = era_counts[era_counts >= 2].index
+        df = df[df['eras'].isin(valid_eras_list)]
+
+        if not df.empty:
+            # Compute per-era correlations using groupby and vectorized operations
+            correlations = df.groupby('eras').apply(
+                lambda group: np.corrcoef(group['weighted_preds'], group['weighted_target'])[0, 1]
+            )
+            # Compute mean correlation
+            if not correlations.empty:
+                corr_result = correlations.mean()
+
+    elif len(weighted_preds) >= 2:
+        corr_result = np.corrcoef(weighted_preds, weighted_target)[0, 1]
+
+    # Return the final correlation result
+    return corr_result
+
+
+
+def mmc_score(
+    targets: pd.Series,
+    predictions: pd.Series,
+    eras: pd.Series,
+    meta_data: pd.Series,
+    sample_weight: pd.Series = None,
+) -> float:
+    # Convert to numpy arrays for faster computations
+    targets_arr = targets.values
+    predictions_arr = predictions.values
+    meta_data_arr = meta_data.values
+    eras_arr = eras.values
+
+    # Step 2: Rank and gaussianize predictions and meta_data using scipy's rankdata
+    predictions_ranked = (stats.rankdata(predictions_arr, method='average') - 0.5) / len(predictions_arr)
+    meta_data_ranked = (stats.rankdata(meta_data_arr, method='average') - 0.5) / len(meta_data_arr)
+
+    predictions_ranked = np.clip(predictions_ranked, 1e-6, 1 - 1e-6)
+    meta_data_ranked = np.clip(meta_data_ranked, 1e-6, 1 - 1e-6)
+
+    predictions_gaussianized = stats.norm.ppf(predictions_ranked)
+    meta_data_gaussianized = stats.norm.ppf(meta_data_ranked)
+
+    # Step 3: Orthogonalize predictions with respect to meta_data
+    m_dot_m = np.dot(meta_data_gaussianized, meta_data_gaussianized)
+    projection = np.dot(predictions_gaussianized, meta_data_gaussianized) / m_dot_m
+    neutral_preds = predictions_gaussianized - meta_data_gaussianized * projection
+
+    # Step 4: Adjust targets
+    if np.all((targets_arr >= 0) & (targets_arr <= 1)):
+        targets_arr = targets_arr * 4
+    targets_arr = targets_arr - targets_arr.mean()
+
+    # Step 5: Prepare sample_weight
+    if sample_weight is not None:
+        sample_weight_arr = sample_weight.values
+    else:
+        sample_weight_arr = np.ones_like(targets_arr)
+
+    # Step 6: Create DataFrame for grouping
+    df = pd.DataFrame({
+        'targets': targets_arr,
+        'neutral_preds': neutral_preds,
+        'eras': eras_arr,
+        'sample_weight': sample_weight_arr
+    })
+
+    # Filter out eras with less than 2 samples
+    era_counts = df['eras'].value_counts()
+    valid_eras = era_counts[era_counts >= 2].index
+    df = df[df['eras'].isin(valid_eras)]
+
+    if df.empty:
+        return np.nan
+
+    # Compute numerator and denominator per era
+    df['numerator'] = df['sample_weight'] * df['targets'] * df['neutral_preds']
+    grouped = df.groupby('eras')
+    numerators = grouped['numerator'].sum()
+    denominators = grouped['sample_weight'].sum()
+
+    # Compute per-era MMC scores
+    per_era_mmc = numerators / denominators
+
+    # Compute the mean MMC score
+    mmc_score = per_era_mmc.mean()
+
+    return mmc_score
+
+
+def numerai_payout_score(targets: pd.Series,
+                  predictions: pd.Series,
+                  eras,
+                  meta_data: pd.Series,
+                  sample_weight: pd.Series = None):
+    numerai_corr = numerai_corr_score(targets, predictions, eras, meta_data, sample_weight)
+    mmc = mmc_score(targets, predictions, eras, meta_data, sample_weight)
+    score = numerai_corr * 0.5 + mmc * 2
+    return score
 
 
 class GreedyEnsemble:
@@ -67,9 +221,8 @@ class GreedyEnsemble:
             model_scores = {}
             for model_name in model_names:
                 predictions = oof_predictions[model_name]
-                print("yo start")
+                logger.info(f"Calculating initial sorted metric - Model: {model_name}")
                 score = self.metric(oof_targets, predictions, oof_eras, meta_data=meta_data, sample_weight=sample_weights)
-                print("yo endstart")
                 model_scores[model_name] = score
             sorted_models = sorted(model_scores.items(), key=lambda x: x[1], reverse=True)
             if self.initial_n is None:
@@ -100,9 +253,8 @@ class GreedyEnsemble:
                 combined_predictions = (current_ensemble_predictions * len(ensemble_indices) + model_predictions) / (
                         len(ensemble_indices) + 1)
 
-                print("start metric")
+                logger.info(f"Calculating candidate model metric - Model: {model_name}")
                 score = self.metric(oof_targets, combined_predictions, oof_eras, meta_data=meta_data, sample_weight=sample_weights)
-                print("end metric")
 
                 if best_score is None or score > best_score:
                     best_score = score
