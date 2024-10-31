@@ -4,7 +4,10 @@ from collections import Counter
 from typing import Callable, Union
 from sklearn.utils import check_random_state
 from scipy import stats
-from . import logger
+from .misc import Logger
+
+# Setup logger
+logger = Logger(log_dir='logs', log_file='meta_model.log').get_logger()
 
 
 def numerai_corr_score(
@@ -300,9 +303,7 @@ class GreedyEnsemble:
             # Evaluate each candidate model
             for model_name in candidate_model_names:
                 model_predictions = oof_predictions[model_name]
-                combined_predictions = (
-                    current_ensemble_predictions * len(ensemble_indices) + model_predictions
-                ) / (len(ensemble_indices) + 1)
+                combined_predictions = (current_ensemble_predictions * len(ensemble_indices) + model_predictions) / (len(ensemble_indices) + 1)
 
                 # Calculate the score of the new ensemble
                 score = self.metric(
@@ -323,10 +324,7 @@ class GreedyEnsemble:
             # Update ensemble with the best model
             ensemble_indices.append(best_model_name)
             used_model_counts[best_model_name] += 1
-            current_ensemble_predictions = (
-                current_ensemble_predictions * (len(ensemble_indices) - 1) +
-                oof_predictions[best_model_name]
-            ) / len(ensemble_indices)
+            current_ensemble_predictions = (current_ensemble_predictions * (len(ensemble_indices) - 1) + oof_predictions[best_model_name]) / len(ensemble_indices)
 
             ensemble_scores.append(best_score)
             ensemble_sizes.append(len(ensemble_indices))

@@ -3,8 +3,11 @@ from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.ensemble import VotingRegressor
 import pickle
 from .meta_ensemble import GreedyEnsemble
-from . import logger
+from .misc import Logger
 import numpy as np
+
+# Setup logger
+logger = Logger(log_dir='logs', log_file='meta_model.log').get_logger()
 
 
 def get_sample_weights(data, wfactor=0.2, eras=None):
