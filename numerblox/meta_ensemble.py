@@ -208,9 +208,9 @@ class GreedyEnsemble:
             raise TypeError("Metric must be a string or a callable.")
 
     def fit(
-        self,
-        oof: pd.DataFrame,
-        sample_weights: pd.Series = None
+            self,
+            oof: pd.DataFrame,
+            sample_weights: pd.Series = None
     ):
 
         rng = check_random_state(self.random_state)
@@ -225,16 +225,13 @@ class GreedyEnsemble:
         if self.num_bags < 1:
             raise ValueError("num_bags cannot be less than one!")
 
-        # Initialize ensemble predictions and other variables
         current_ensemble_predictions = pd.Series(0.0, index=oof.index)
         ensemble_indices = []
         used_model_counts = Counter()
 
-        # Initialize ensemble_scores and ensemble_sizes lists
         ensemble_scores = []
         ensemble_sizes = []
 
-        # Sorted initialization
         if self.sorted_initialization:
             model_scores = {}
             for model_name in model_names:
@@ -249,25 +246,25 @@ class GreedyEnsemble:
                 )
                 model_scores[model_name] = score
 
-            # Sort models by score in descending order
             sorted_models = sorted(model_scores.items(), key=lambda x: x[1], reverse=True)
 
-            # Determine the number of models to initialize
             if self.initial_n is None:
                 N = self._determine_initial_n([score for name, score in sorted_models])
             else:
                 N = self.initial_n
 
             N = min(N, self.max_ensemble_size)
-            # Add the top N models to the ensemble
+
             for i in range(N):
                 model_name = sorted_models[i][0]
+                model_score = sorted_models[i][1]
                 current_ensemble_predictions += oof_predictions[model_name]
                 ensemble_indices.append(model_name)
                 used_model_counts[model_name] += 1
+                logger.info(f"Selected Model {i + 1}: {model_name} with score {model_score}")
+
             current_ensemble_predictions /= N
 
-            # Compute initial ensemble score
             initial_score = self.metric(
                 oof_targets,
                 current_ensemble_predictions,
@@ -277,7 +274,7 @@ class GreedyEnsemble:
             )
             ensemble_scores.append(initial_score)
             ensemble_sizes.append(len(ensemble_indices))
-            logger.info(f"Initial ensemble score with {len(ensemble_indices)} models: {initial_score}")
+            logger.info(f"Initial ensemble score with {len(ensemble_indices)} models ({', '.join(ensemble_indices)}): {initial_score}")
         else:
             # Initialize empty ensemble_scores and ensemble_sizes if no sorted initialization
             ensemble_scores = []
