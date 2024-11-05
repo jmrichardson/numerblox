@@ -236,7 +236,6 @@ class GreedyEnsemble:
             model_scores = {}
             for model_name in model_names:
                 predictions = oof_predictions[model_name]
-                logger.info(f"Calculating initial sorted metric - Model: {model_name}")
                 score = self.metric(
                     oof_targets,
                     predictions,
@@ -244,6 +243,7 @@ class GreedyEnsemble:
                     meta_data=meta_data,
                     sample_weight=sample_weights
                 )
+                logger.info(f"Calculating initial sorted metric - Model: {model_name}: {score}")
                 model_scores[model_name] = score
 
             sorted_models = sorted(model_scores.items(), key=lambda x: x[1], reverse=True)

@@ -38,7 +38,7 @@ def get_sample_weights(data, wfactor=0.2, eras=None):
 
 
 class MetaModel(BaseEstimator, RegressorMixin):
-    def __init__(self, max_ensemble_size: int = 10, num_bags=50, random_state: int = 42, weight_factor: float = None, metric='corr'):
+    def __init__(self, max_ensemble_size: int = 15, num_bags=50, random_state: int = 42, weight_factor: float = None, metric='corr'):
         self.metric = metric
         self.max_ensemble_size = max_ensemble_size
         self.num_bags = num_bags
