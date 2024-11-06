@@ -136,11 +136,11 @@ class SubmitService:
         """Execute the task to check, download, generate, and submit predictions."""
         if self.check_new_round_with_retry():
             current_round = self.napi.get_current_round()
-            live_data_path = os.path.join(self.tmp_dir, f"live/{current_round}")
+            live_data_path = f"live/{current_round}"
 
             logger.info(f"Starting data download and submission process for Numerai round {current_round}.")
             if self.download_live_data_with_retry(live_data_path):
-                live_data = pd.read_parquet(f"{live_data_path}/live.parquet")
+                live_data = pd.read_parquet(f"{self.tmp_dir}/{live_data_path}/live.parquet")
                 live_features = live_data[[col for col in live_data.columns if "feature" in col]]
 
                 for model_name, model_data in self.models.items():
