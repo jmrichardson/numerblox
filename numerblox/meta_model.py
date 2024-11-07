@@ -97,14 +97,17 @@ class MetaModel(BaseEstimator, RegressorMixin):
         # Prepare the final VotingRegressor ensemble model
         weights_list = []
         estimators_list = []
+        models = []
         for model_name, model in selected_models:
             weight = self.weights_.loc[model_name]  # Get the weight for the model
             weights_list.append(weight)  # Add the weight to the list
             logger.info(f"Adding model - Model: {model_name}, Weight: {weight}")
             estimators_list.append((model_name, model))  # Add the model and its name to the list
+            models.append(model)
 
         # Create the VotingRegressor with the selected models and their corresponding weights
         self.ensemble_model = VotingRegressor(estimators=estimators_list, weights=weights_list)
+        self.ensemble_model.estimators_ = models
 
         return self
 
