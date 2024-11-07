@@ -149,7 +149,7 @@ class SubmitService:
                     with open(model_path, 'rb') as model_file:
                         model = pickle.load(model_file)
 
-                    predictions = model.predict(live_features.iloc[:, -18:])
+                    predictions = model.predict(live_features)
                     predictions_df = pd.DataFrame(predictions, index=live_data.index, columns=['prediction'])
 
                     if not self.submit_predictions_with_retry(predictions_df, model_name):
