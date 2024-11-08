@@ -18,7 +18,7 @@ logger = Logger(log_dir='logs', log_file='submit_service.log').get_logger()
 
 class SubmitService:
 
-    def __init__(self, models, public_id, secret_key, interval_minutes=5, start_hour=13, end_hour=22, tmp_dir="tmp", version="5.0", max_retries=3, sleep_time=10, cleanup=False):
+    def __init__(self, models, public_id, secret_key, interval_minutes=5, start_hour=13, end_hour=23, tmp_dir="tmp", version="5.0", max_retries=3, sleep_time=10, cleanup=False):
         self.models = models
         self.napi = NumerAPI(public_id, secret_key, verbosity="info")
         self.key = Key(pub_id=public_id, secret_key=secret_key)
@@ -196,7 +196,7 @@ class SubmitService:
         # Skip processing if we've already submitted for the current round
         if self.last_submitted_round == current_round:
             logger.info(f"Already submitted for Numerai round {current_round}. Skipping.")
-            return False
+            return True
 
         if not self.check_new_round_with_retry():
             logger.info(f"No new Numerai round detected. Current round is {current_round}. Skipping submission.")
@@ -222,6 +222,7 @@ class SubmitService:
                 if not self.submit_predictions_with_retry(predictions_df, model_name):
                     logger.error(f"Submission failed for model '{model_name}' after retries.")
                     all_successful = False
+                    return False
 
             if all_successful:
                 self.save_submission_success(live_data_path, current_round, list(self.models.keys()))
@@ -235,10 +236,7 @@ class SubmitService:
                         logger.info(f"Cleaned up temporary files for round {current_round}.")
                     except Exception as e:
                         logger.error(f"Error cleaning up temporary files: {str(e)}")
-
                 return True
-            else:
-                return False
         else:
             logger.error("Live data download failed after multiple retries.")
             return False
@@ -257,7 +255,7 @@ class SubmitService:
                 task_completed = self.task()
                 if task_completed:
                     # Calculate the next start time one minute before the start hour on the next day
-                    next_start_time = datetime.combine(current_time.date() + timedelta(days=1), datetime.min.time()) + timedelta(hours=self.start_hour) - timedelta(minutes=1)
+                    next_start_time = datetime.combine(current_time.date() + timedelta(days=1), datetime.min.time()) + timedelta(hours=self.start_hour)
                     time_to_wait = (next_start_time - current_time).total_seconds()
 
                     # Convert `time_to_wait` to hours and minutes for readability
