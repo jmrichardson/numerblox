@@ -25,11 +25,14 @@ class SubmitService:
         self.end_hour = end_hour
         self.version = version
         self.tmp_dir = tmp_dir
-        self.max_retries = max_retries  # Set the maximum number of retries
-        self.sleep_time = sleep_time  # Set the sleep time between retries
+        self.max_retries = max_retries
+        self.sleep_time = sleep_time
         self.fail_delay = 60 * 60  # 60-minute fail delay before retrying submission process
         self.data_downloader = NumeraiClassicDownloader(directory_path=self.tmp_dir)
         self.submitter = NumeraiClassicSubmitter(directory_path=self.tmp_dir, key=self.key)
+
+        # Store the last successfully submitted round
+        self.last_submitted_round = self._load_last_successful_round()
 
 
     def _validate_args(self):
@@ -76,6 +79,24 @@ class SubmitService:
                 model = pickle.load(model_file)
                 if not hasattr(model, 'predict') or not callable(getattr(model, 'predict')):
                     raise ValueError(f"Model object in {model_path} does not have a callable 'predict' method.")
+
+    def _load_last_successful_round(self):
+        """Load the last successfully submitted round from disk, if it exists."""
+        round_file_path = os.path.join(self.tmp_dir, 'last_successful_round.txt')
+        if os.path.exists(round_file_path):
+            with open(round_file_path, 'r') as file:
+                try:
+                    return int(file.read().strip())
+                except ValueError:
+                    logger.warning("Failed to read last successful round from file. Starting fresh.")
+        return None
+
+    def _save_last_successful_round(self, round_number):
+        """Save the last successful round to a file."""
+        round_file_path = os.path.join(self.tmp_dir, 'last_successful_round.txt')
+        with open(round_file_path, 'w') as file:
+            file.write(str(round_number))
+        logger.info(f"Saved last successful round {round_number} to disk.")
 
     def check_new_round_with_retry(self):
         """Check for a new Numerai round with retry logic."""
@@ -132,35 +153,64 @@ class SubmitService:
         time.sleep(self.fail_delay)
         return False
 
+    def submission_success_path(self, live_data_path):
+        """Return the path to the submission success file for the round."""
+        return os.path.join(self.tmp_dir, live_data_path, 'submission_success.txt')
+
+    def save_submission_success(self, live_data_path, current_round, model_names):
+        """Save a record of a successful submission to a file."""
+        success_path = self.submission_success_path(live_data_path)
+        timestamp = datetime.utcnow().isoformat()
+        content = f"Round: {current_round}\nTimestamp: {timestamp}\nModels: {', '.join(model_names)}\n"
+
+        with open(success_path, 'w') as file:
+            file.write(content)
+
+        logger.info(f"Submission success saved to {success_path} with details:\n{content}")
+        self._save_last_successful_round(current_round)  # Update the last submitted round
+
     def task(self):
         """Execute the task to check, download, generate, and submit predictions."""
-        if self.check_new_round_with_retry():
-            current_round = self.napi.get_current_round()
-            live_data_path = f"live/{current_round}"
+        current_round = self.napi.get_current_round()
 
-            logger.info(f"Starting data download and submission process for Numerai round {current_round}.")
-            if self.download_live_data_with_retry(live_data_path):
-                live_data = pd.read_parquet(f"{self.tmp_dir}/{live_data_path}/live.parquet")
-                live_features = live_data[[col for col in live_data.columns if "feature" in col]]
+        # Skip processing if we've already submitted for the current round
+        if self.last_submitted_round == current_round:
+            logger.info(f"Already submitted for Numerai round {current_round}. Skipping.")
+            return
 
-                for model_name, model_data in self.models.items():
-                    logger.info(f"Generating predictions for model '{model_name}'.")
-                    model_path = model_data['path']
-                    with open(model_path, 'rb') as model_file:
-                        model = pickle.load(model_file)
+        live_data_path = f"live/{current_round}"
+        if os.path.exists(self.submission_success_path(live_data_path)):
+            logger.info(f"Submission already completed for Numerai round {current_round}. Skipping.")
+            self._save_last_successful_round(current_round)  # Update last submitted round
+            return
 
-                    predictions = model.predict(live_features)
-                    predictions_df = pd.DataFrame(predictions, index=live_data.index, columns=['prediction'])
+        logger.info(f"Starting data download and submission process for Numerai round {current_round}.")
+        if self.download_live_data_with_retry(live_data_path):
+            live_data = pd.read_parquet(f"{self.tmp_dir}/{live_data_path}/live.parquet")
+            live_features = live_data[[col for col in live_data.columns if "feature" in col]]
 
-                    if not self.submit_predictions_with_retry(predictions_df, model_name):
-                        logger.error(f"Submission failed for model '{model_name}' after retries.")
-            else:
-                logger.error("Live data download failed after multiple retries.")
+            all_successful = True
+            for model_name, model_data in self.models.items():
+                logger.info(f"Generating predictions for model '{model_name}'.")
+                model_path = model_data['path']
+                with open(model_path, 'rb') as model_file:
+                    model = pickle.load(model_file)
+
+                predictions = model.predict(live_features)
+                predictions_df = pd.DataFrame(predictions, index=live_data.index, columns=['prediction'])
+
+                if not self.submit_predictions_with_retry(predictions_df, model_name):
+                    logger.error(f"Submission failed for model '{model_name}' after retries.")
+                    all_successful = False
+
+            if all_successful:
+                self.save_submission_success(live_data_path, current_round, list(self.models.keys()))
+                logger.info(f"Submission successful for all models in Numerai round {current_round}.")
+                self.last_submitted_round = current_round  # Update last submitted round in memory
         else:
-            logger.info("No new Numerai round detected or failed after retries. Submission process not initiated.")
+            logger.error("Live data download failed after multiple retries.")
 
     def daemon(self, validate=True):
-        """Start the scheduled submission service, running between specified hours on weekdays."""
         if validate:
             self._validate_args()
 
@@ -169,8 +219,14 @@ class SubmitService:
 
         while True:
             current_time = datetime.utcnow()
+            # Only operate during specified hours and weekdays
             if current_time.weekday() in range(1, 6) and self.start_hour <= current_time.hour < self.end_hour:
-                schedule.run_pending()
+                current_round = self.napi.get_current_round()  # Retrieve the current round once at the start of the cycle
+
+                # Skip schedule if already submitted for the current round
+                if self.last_submitted_round != current_round:
+                    schedule.run_pending()
+
             time.sleep(60)
 
     def submit(self, validate=True):
