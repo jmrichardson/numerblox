@@ -214,20 +214,27 @@ class SubmitService:
         if validate:
             self._validate_args()
 
-        logger.info(f"Starting NumerAI automated submission service. Scheduled every {self.interval_minutes} minutes, active between {self.start_hour}:00 and {self.end_hour}:00 UTC.")
-        schedule.every(self.interval_minutes).minutes.do(self.submit)
+        logger.info(f"Starting NumerAI automated submission service. Active every {self.interval_minutes} minutes between {self.start_hour}:00 and {self.end_hour}:00 UTC.")
 
         while True:
             current_time = datetime.utcnow()
-            # Only operate during specified hours and weekdays
+
+            # Check if the current time is within the specified hours and it's a weekday
             if current_time.weekday() in range(1, 6) and self.start_hour <= current_time.hour < self.end_hour:
-                current_round = self.napi.get_current_round()  # Retrieve the current round once at the start of the cycle
+                current_round = self.napi.get_current_round()
 
-                # Skip schedule if already submitted for the current round
+                # Run the task only if we haven't submitted for this round yet
                 if self.last_submitted_round != current_round:
-                    schedule.run_pending()
+                    self.task()
 
-            time.sleep(60)
+                    # Update last submitted round after task completion
+                    self.last_submitted_round = current_round
+
+                # Wait for the specified interval before running again
+                time.sleep(self.interval_minutes * 60)
+            else:
+                # If outside the allowed time window, wait a minute before checking again
+                time.sleep(60)
 
     def submit(self, validate=True):
         logger.info("Initiating submission task.")
