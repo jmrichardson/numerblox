@@ -190,7 +190,7 @@ class SubmitService:
         """Execute the task to check, download, generate, and submit predictions."""
         current_round = self.get_current_round_with_retry()
         if current_round is None:
-            logger.error("Failed to get current Numerai round. Skipping task.")
+            logger.error("Failed to get current Numerai round.")
             return False
 
         # Skip processing if we've already submitted for the current round
@@ -199,7 +199,7 @@ class SubmitService:
             return True
 
         if not self.check_new_round_with_retry():
-            logger.info(f"No new Numerai round detected. Current round is {current_round}. Skipping submission.")
+            logger.info(f"No new Numerai round detected. Current round is {current_round}.")
             return False
 
         live_data_path = f"live/{current_round}"
@@ -262,7 +262,7 @@ class SubmitService:
                     hours, remainder = divmod(time_to_wait, 3600)
                     minutes, _ = divmod(remainder, 60)
 
-                    logger.info(f"Task completed successfully. Sleeping until {next_start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC (in {int(hours)} hours and {int(minutes)} minutes) for the next submission.")
+                    logger.info(f"Submission successful. Sleeping until {next_start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC (in {int(hours)} hours and {int(minutes)} minutes) for the next submission.")
                     time.sleep(time_to_wait)
 
                 else:
@@ -278,10 +278,9 @@ class SubmitService:
                 hours, remainder = divmod(time_to_wait, 3600)
                 minutes, _ = divmod(remainder, 60)
 
-                logger.info(f"Outside active hours. Waiting for start time: {int(hours)} hours and {int(minutes)} minutes from now.")
+                logger.info(f"Outside active hours. Sleeping until {next_start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC (in {int(hours)} hours and {int(minutes)} minutes) for the next submission.")
                 # Sleep until the calculated time
                 time.sleep(time_to_wait)
-
 
     def submit(self, validate=True):
         logger.info("Initiating submission task.")
