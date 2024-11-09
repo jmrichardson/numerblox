@@ -181,24 +181,29 @@ class SubmitService:
         if validate:
             self._validate_args()
 
-        logger.info(f"Starting NumerAI automated submission service. Active every {self.interval_minutes} minutes between {self.start_hour}:00 and {self.end_hour}:00 UTC.")
+        logger.info(f"Starting NumerAI automated submission service. Active every {self.interval_minutes} minutes between {self.start_hour}:00 and {self.end_hour}:00 UTC on Tuesday to Saturday.")
 
         while True:
             current_time = datetime.utcnow()
 
-            # Check if the current time is within the specified hours and it's a weekday
+            # Check if the current time is within the specified hours and it's a valid day (Tuesday to Saturday)
             if current_time.weekday() in range(1, 6) and self.start_hour <= current_time.hour < self.end_hour:
                 task_completed = self.task()
                 if task_completed:
-                    # Calculate the next start time one minute before the start hour on the next day
-                    next_start_time = datetime.combine(current_time.date() + timedelta(days=1), datetime.min.time()) + timedelta(hours=self.start_hour)
+                    # Calculate the next start time at the start hour on the next valid day
+                    next_date = current_time.date() + timedelta(days=1)
+                    # Skip directly to Tuesday if next_date is Sunday or Monday
+                    while next_date.weekday() not in range(1, 6):  # Ensure it's Tuesday to Saturday
+                        next_date += timedelta(days=1)
+
+                    next_start_time = datetime.combine(next_date, datetime.min.time()) + timedelta(hours=self.start_hour)
                     time_to_wait = (next_start_time - current_time).total_seconds()
 
                     # Convert `time_to_wait` to hours and minutes for readability
                     hours, remainder = divmod(time_to_wait, 3600)
                     minutes, _ = divmod(remainder, 60)
 
-                    logger.info(f"Submission successful. Sleeping until {next_start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC (in {int(hours)} hours and {int(minutes)} minutes) for the next submission.")
+                    logger.info(f"Sleeping until {next_start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC ({next_start_time.strftime('%A')}) (in {int(hours)} hours and {int(minutes)} minutes) for the next submission.")
                     time.sleep(time_to_wait)
 
                 else:
@@ -206,15 +211,23 @@ class SubmitService:
                     logger.info(f"Submission failed. Waiting {self.interval_minutes} minutes to retry.")
                     time.sleep(self.interval_minutes * 60)
             else:
-                # If outside the allowed time window, calculate the wait time until the next start hour
-                next_start_time = datetime.combine(current_time.date() + timedelta(days=1), datetime.min.time()) + timedelta(hours=self.start_hour)
+                # If outside the allowed time window, calculate the wait time until the next start hour on a valid day
+                next_date = current_time.date()
+                # If current time is after end_hour, move to next day
+                if current_time.hour >= self.end_hour:
+                    next_date += timedelta(days=1)
+                # If the next date is not within Tuesday to Saturday, move to the next valid day
+                while next_date.weekday() not in range(1, 6):  # 1 to 5 are Tuesday to Saturday
+                    next_date += timedelta(days=1)
+
+                next_start_time = datetime.combine(next_date, datetime.min.time()) + timedelta(hours=self.start_hour)
                 time_to_wait = (next_start_time - current_time).total_seconds()
 
                 # Convert seconds to hours and minutes for readability
                 hours, remainder = divmod(time_to_wait, 3600)
                 minutes, _ = divmod(remainder, 60)
 
-                logger.info(f"Outside active hours. Sleeping until {next_start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC (in {int(hours)} hours and {int(minutes)} minutes) for the next submission.")
+                logger.info(f"Sleeping until {next_start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC ({next_start_time.strftime('%A')}) (in {int(hours)} hours and {int(minutes)} minutes) for the next submission.")
                 # Sleep until the calculated time
                 time.sleep(time_to_wait)
 
