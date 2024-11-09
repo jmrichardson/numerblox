@@ -8,6 +8,7 @@ from typing import Callable, Union
 from sklearn.utils import check_random_state
 from scipy import stats
 from .misc import Logger
+from typing import Optional, Union
 
 # Setup logger
 logger = Logger(log_dir='logs', log_file='meta_model.log').get_logger()
@@ -17,49 +18,60 @@ def numerai_corr_score(
     targets: pd.Series,
     predictions: pd.Series,
     eras: pd.Series,
-    meta_data=None,
-    sample_weight: pd.Series = None
+    meta_data: Optional[dict] = None,
+    sample_weight: Optional[pd.Series] = None
 ) -> float:
-    # Align eras and sample_weight with the predictions' index
+    """
+    Calculate the Numerai correlation score between targets and predictions with optional per-era and weighted correlations.
+
+    Parameters:
+    - targets (pd.Series): Series of true target values.
+    - predictions (pd.Series): Series of predicted values.
+    - eras (pd.Series): Series indicating the era of each observation.
+    - meta_data (Optional[dict]): Optional metadata for additional information.
+    - sample_weight (Optional[pd.Series]): Optional series of weights for each prediction.
+
+    Returns:
+    - float: The mean per-era correlation score or the overall correlation if no eras are provided.
+    """
+    # Align `eras` and `sample_weight` to the index of `predictions`
     eras = eras.reindex(predictions.index)
     if sample_weight is not None:
         sample_weight = sample_weight.reindex(predictions.index)
 
-    # Convert to numpy arrays for faster computations
+    # Prepare predictions and targets for correlation computation
     preds_filled = predictions.fillna(0.5).values
     targets_values = targets.values
 
-    # Rank and gaussianize predictions using scipy's rankdata
+    # Rank and Gaussianize predictions
     ranked_preds = stats.rankdata(preds_filled, method='average') / len(preds_filled)
     gauss_ranked_preds = stats.norm.ppf(ranked_preds)
 
-    # Center target to zero mean
-    target_mean = targets_values.mean()
-    centered_target = targets_values - target_mean
+    # Center targets around zero
+    centered_target = targets_values - targets_values.mean()
 
-    # Accentuate tails of predictions and targets
+    # Accentuate the tails for more sensitivity in the extreme values
     preds_p15 = np.sign(gauss_ranked_preds) * np.abs(gauss_ranked_preds) ** 1.5
     target_p15 = np.sign(centered_target) * np.abs(centered_target) ** 1.5
 
     # Apply sample weights if provided
     if sample_weight is not None:
-        sample_weight_values = sample_weight.values
-        weighted_preds = preds_p15 * sample_weight_values
-        weighted_target = target_p15 * sample_weight_values
+        weighted_preds = preds_p15 * sample_weight.values
+        weighted_target = target_p15 * sample_weight.values
     else:
         weighted_preds = preds_p15
         weighted_target = target_p15
 
-    # Remove inf and NaN values from weighted_preds and weighted_target
+    # Filter out non-finite values (e.g., NaNs, infs)
     valid_mask = np.isfinite(weighted_preds) & np.isfinite(weighted_target)
     weighted_preds = weighted_preds[valid_mask]
     weighted_target = weighted_target[valid_mask]
     valid_eras = eras[valid_mask] if eras is not None else None
 
-    # Initialize correlation result as NaN
-    corr_result = np.nan
-
-    if valid_eras is not None:
+    # Calculate per-era correlation if `eras` is provided and has sufficient data
+    corr_result = np.nan  # Default result if conditions aren't met
+    if valid_eras is not None and not valid_eras.empty:
+        # Create DataFrame for efficient grouping
         df = pd.DataFrame({
             'weighted_preds': weighted_preds,
             'weighted_target': weighted_target,
@@ -71,131 +83,155 @@ def numerai_corr_score(
         valid_eras_list = era_counts[era_counts >= 2].index
         df = df[df['eras'].isin(valid_eras_list)]
 
+        # Compute per-era correlations if we have valid data
         if not df.empty:
-            # Compute per-era correlations using groupby and vectorized operations
             correlations = df.groupby('eras').apply(
                 lambda group: np.corrcoef(group['weighted_preds'], group['weighted_target'])[0, 1]
             )
-            # Compute mean correlation
-            if not correlations.empty:
-                corr_result = correlations.mean()
+            corr_result = correlations.mean() if not correlations.empty else np.nan
+        else:
+            logger.warning("No eras with sufficient samples for correlation calculation.")
 
+    # Fallback to overall correlation if no valid per-era data
     elif len(weighted_preds) >= 2:
         corr_result = np.corrcoef(weighted_preds, weighted_target)[0, 1]
 
-    # Return the final correlation result
     return corr_result
 
 
 def mmc_score(
-    targets: pd.Series,
-    predictions: pd.Series,
-    eras: pd.Series,
-    meta_data: pd.Series,
-    sample_weight: pd.Series = None,
+        targets: pd.Series,
+        predictions: pd.Series,
+        eras: pd.Series,
+        meta_data: pd.Series,
+        sample_weight: Optional[pd.Series] = None
 ) -> float:
-    # Align sample_weight with targets
+    """
+    Calculate the Mean Model Correlation (MMC) score, adjusted for orthogonality with meta data.
+
+    Args:
+        targets (pd.Series): Target values, expected to be in range [0, 1].
+        predictions (pd.Series): Model predictions.
+        eras (pd.Series): Era identifiers.
+        meta_data (pd.Series): Meta data for orthogonalization.
+        sample_weight (Optional[pd.Series]): Sample weights, if provided; otherwise assumed to be 1.
+
+    Returns:
+        float: The mean MMC score, NaN if eras are insufficient for calculation.
+    """
+    # Align sample weights with targets
     if sample_weight is not None:
         sample_weight = sample_weight.reindex(targets.index)
+        sample_weight_values = sample_weight.values
+    else:
+        sample_weight_values = np.ones_like(targets)
 
-    # Convert to numpy arrays for faster computations
-    targets_arr = targets.values
-    predictions_arr = predictions.values
-    meta_data_arr = meta_data.values
-    eras_arr = eras.values
+    # Convert series to numpy arrays for optimized computations
+    targets_arr, predictions_arr = targets.values, predictions.values
+    meta_data_arr, eras_arr = meta_data.values, eras.values
 
-    # Step 2: Rank and gaussianize predictions and meta_data using scipy's rankdata
+    # Rank and gaussianize predictions and meta_data
     predictions_ranked = (stats.rankdata(predictions_arr, method='average') - 0.5) / len(predictions_arr)
     meta_data_ranked = (stats.rankdata(meta_data_arr, method='average') - 0.5) / len(meta_data_arr)
+    predictions_gaussianized = stats.norm.ppf(np.clip(predictions_ranked, 1e-6, 1 - 1e-6))
+    meta_data_gaussianized = stats.norm.ppf(np.clip(meta_data_ranked, 1e-6, 1 - 1e-6))
 
-    predictions_ranked = np.clip(predictions_ranked, 1e-6, 1 - 1e-6)
-    meta_data_ranked = np.clip(meta_data_ranked, 1e-6, 1 - 1e-6)
+    # Orthogonalize predictions with respect to meta_data
+    projection = np.dot(predictions_gaussianized, meta_data_gaussianized) / np.dot(meta_data_gaussianized, meta_data_gaussianized)
+    neutral_predictions = predictions_gaussianized - meta_data_gaussianized * projection
 
-    predictions_gaussianized = stats.norm.ppf(predictions_ranked)
-    meta_data_gaussianized = stats.norm.ppf(meta_data_ranked)
-
-    # Step 3: Orthogonalize predictions with respect to meta_data
-    m_dot_m = np.dot(meta_data_gaussianized, meta_data_gaussianized)
-    projection = np.dot(predictions_gaussianized, meta_data_gaussianized) / m_dot_m
-    neutral_preds = predictions_gaussianized - meta_data_gaussianized * projection
-
-    # Step 4: Adjust targets
+    # Adjust targets scaling if in range [0, 1]
     if np.all((targets_arr >= 0) & (targets_arr <= 1)):
-        targets_arr = targets_arr * 4
-    targets_arr = targets_arr - targets_arr.mean()
+        targets_arr *= 4
+    targets_arr -= targets_arr.mean()
 
-    # Step 5: Prepare sample_weight
-    if sample_weight is not None:
-        sample_weight_arr = sample_weight.values
-    else:
-        sample_weight_arr = np.ones_like(targets_arr)
-
-    # Step 6: Create DataFrame for grouping
+    # Construct DataFrame to facilitate per-era calculations
     df = pd.DataFrame({
         'targets': targets_arr,
-        'neutral_preds': neutral_preds,
+        'neutral_predictions': neutral_predictions,
         'eras': eras_arr,
-        'sample_weight': sample_weight_arr
+        'sample_weight': sample_weight_values
     })
 
-    # Filter out eras with less than 2 samples
-    era_counts = df['eras'].value_counts()
-    valid_eras = era_counts[era_counts >= 2].index
+    # Filter out eras with fewer than 2 samples
+    valid_eras = df['eras'].value_counts()[lambda x: x >= 2].index
     df = df[df['eras'].isin(valid_eras)]
-
     if df.empty:
         return np.nan
 
-    # Compute numerator and denominator per era
-    df['numerator'] = df['sample_weight'] * df['targets'] * df['neutral_preds']
+    # Compute MMC per era
+    df['numerator'] = df['sample_weight'] * df['targets'] * df['neutral_predictions']
     grouped = df.groupby('eras')
-    numerators = grouped['numerator'].sum()
-    denominators = grouped['sample_weight'].sum()
+    per_era_mmc = grouped['numerator'].sum() / grouped['sample_weight'].sum()
 
-    # Compute per-era MMC scores
-    per_era_mmc = numerators / denominators
-
-    # Compute the mean MMC score
-    mmc_score = per_era_mmc.mean()
-
-    return mmc_score
+    return per_era_mmc.mean()
 
 
 def numerai_payout_score(
-    targets: pd.Series,
-    predictions: pd.Series,
-    eras: pd.Series,
-    meta_data: pd.Series,
-    sample_weight: pd.Series = None
+        targets: pd.Series,
+        predictions: pd.Series,
+        eras: pd.Series,
+        meta_data: pd.Series,
+        sample_weight: pd.Series = None
 ) -> float:
+    """
+    Calculate the Numerai payout score based on correlation and MMC (Meta Model Contribution) scores.
+
+    Args:
+        targets (pd.Series): True target values for each sample.
+        predictions (pd.Series): Model predictions for each sample.
+        eras (pd.Series): Era identifiers for each sample to group by eras.
+        meta_data (pd.Series): Additional metadata for custom handling.
+        sample_weight (pd.Series, optional): Weights for each sample, defaults to None.
+
+    Returns:
+        float: The calculated payout score, a weighted combination of correlation and MMC scores.
+    """
+    # Calculate correlation and MMC scores
     numerai_corr = numerai_corr_score(targets, predictions, eras, meta_data, sample_weight)
     mmc = mmc_score(targets, predictions, eras, meta_data, sample_weight)
+
+    # Weighted combination of scores
     score = numerai_corr * 0.5 + mmc * 2
     return score
 
 
-def get_sample_weights(data, wfactor=0.2, eras=None):
+def get_sample_weights(
+        data: pd.DataFrame,
+        wfactor: float = 0.2,
+        eras: Optional[Union[pd.Series, np.ndarray]] = None
+) -> pd.Series:
+    """
+    Generate sample weights for data, optionally adjusting weights based on eras.
+
+    Args:
+        data (pd.DataFrame): Input data containing samples and optional "era" column.
+        wfactor (float): Weight factor controlling the rate of decay in weights.
+        eras (Optional[Union[pd.Series, np.ndarray]]): Series or array specifying eras;
+            if None, will use 'era' column from `data` if present.
+
+    Returns:
+        pd.Series: Sample weights, with decay applied across samples, averaged within eras if provided.
+    """
     num_weights = len(data)
 
-    # Calculate the weights as if we are not handling eras
+    # Calculate decaying weights and normalize
     weights = np.exp(-np.arange(num_weights) / (wfactor * num_weights))[::-1]
     normalized_weights = weights * (num_weights / weights.sum())
 
+    # Use the provided eras or retrieve from data if not supplied
     if eras is None and 'era' in data.columns:
-        # If eras is not supplied, try to get it from the data's "era" column
         eras = data['era']
 
     if eras is not None:
-        # Create a DataFrame with 'era' and 'normalized_weights'
+        # Compute weights averaged within each era
         temp_df = pd.DataFrame({
-            'era': eras.values,
+            'era': eras,
             'normalized_weights': normalized_weights
         }, index=data.index)
-
-        # Compute the average weight per era
-        avg_weights_per_era = temp_df.groupby('era')['normalized_weights'].transform('mean')
-        sample_weights = avg_weights_per_era
+        sample_weights = temp_df.groupby('era')['normalized_weights'].transform('mean')
     else:
+        # Return weights directly if no eras are provided
         sample_weights = pd.Series(normalized_weights, index=data.index)
 
     return sample_weights
