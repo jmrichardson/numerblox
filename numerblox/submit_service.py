@@ -33,50 +33,6 @@ class SubmitService:
         self.cleanup = cleanup
         self.last_submitted_round = self._load_last_successful_round()
 
-    def _validate_args(self):
-        # Check public_id and secret_key
-        if not isinstance(self.key.pub_id, str) or not isinstance(self.key.secret_key, str):
-            raise ValueError("Public ID and Secret Key must be strings.")
-
-        # Check interval_minutes
-        if not isinstance(self.interval_minutes, int) or self.interval_minutes <= 0:
-            raise ValueError("interval_minutes must be a positive integer.")
-
-        # Check start_hour and end_hour
-        if not (0 <= self.start_hour < 24) or not (0 <= self.end_hour < 24):
-            raise ValueError("start_hour and end_hour must be integers between 0 and 23.")
-
-        # Check max_retries and sleep_time
-        if not isinstance(self.max_retries, int) or self.max_retries < 0:
-            raise ValueError("max_retries must be a non-negative integer.")
-        if not isinstance(self.sleep_time, int) or self.sleep_time <= 0:
-            raise ValueError("sleep_time must be a positive integer.")
-
-        # Check model names
-        all_models = self.napi.get_models()
-        for model_name, model_data in self.models.items():
-            if model_name not in all_models:
-                raise ValueError(f"Model name '{model_name}' is not found in NumerAPI models.")
-
-        # Check model paths
-        if not isinstance(self.models, dict) or not all(isinstance(model_data.get('path'), str) for model_data in self.models.values()):
-            raise ValueError("Each model should be specified in a dictionary with a 'path' key pointing to the model file.")
-
-        # Check model files
-        for model_name, model_data in self.models.items():
-            model_path = model_data.get('path')
-
-            # Check if model path exists and is a .pkl file
-            if not model_path or not model_path.endswith('.pkl'):
-                raise ValueError(f"Model path for {model_name} must be a valid .pkl file.")
-            if not os.path.exists(model_path):
-                raise FileNotFoundError(f"Model file not found at path: {model_path}")
-
-            # Load model and check for 'predict' method
-            with open(model_path, 'rb') as model_file:
-                model = pickle.load(model_file)
-                if not hasattr(model, 'predict') or not callable(getattr(model, 'predict')):
-                    raise ValueError(f"Model object in {model_path} does not have a callable 'predict' method.")
 
     def _load_last_successful_round(self):
         """Load the last successfully submitted round from disk, if it exists."""
@@ -267,3 +223,48 @@ class SubmitService:
         if validate:
             self._validate_args()
         self.task()
+
+    def _validate_args(self):
+        # Check public_id and secret_key
+        if not isinstance(self.key.pub_id, str) or not isinstance(self.key.secret_key, str):
+            raise ValueError("Public ID and Secret Key must be strings.")
+
+        # Check interval_minutes
+        if not isinstance(self.interval_minutes, int) or self.interval_minutes <= 0:
+            raise ValueError("interval_minutes must be a positive integer.")
+
+        # Check start_hour and end_hour
+        if not (0 <= self.start_hour < 24) or not (0 <= self.end_hour < 24):
+            raise ValueError("start_hour and end_hour must be integers between 0 and 23.")
+
+        # Check max_retries and sleep_time
+        if not isinstance(self.max_retries, int) or self.max_retries < 0:
+            raise ValueError("max_retries must be a non-negative integer.")
+        if not isinstance(self.sleep_time, int) or self.sleep_time <= 0:
+            raise ValueError("sleep_time must be a positive integer.")
+
+        # Check model names
+        all_models = self.napi.get_models()
+        for model_name, model_data in self.models.items():
+            if model_name not in all_models:
+                raise ValueError(f"Model name '{model_name}' is not found in NumerAPI models.")
+
+        # Check model paths
+        if not isinstance(self.models, dict) or not all(isinstance(model_data.get('path'), str) for model_data in self.models.values()):
+            raise ValueError("Each model should be specified in a dictionary with a 'path' key pointing to the model file.")
+
+        # Check model files
+        for model_name, model_data in self.models.items():
+            model_path = model_data.get('path')
+
+            # Check if model path exists and is a .pkl file
+            if not model_path or not model_path.endswith('.pkl'):
+                raise ValueError(f"Model path for {model_name} must be a valid .pkl file.")
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(f"Model file not found at path: {model_path}")
+
+            # Load model and check for 'predict' method
+            with open(model_path, 'rb') as model_file:
+                model = pickle.load(model_file)
+                if not hasattr(model, 'predict') or not callable(getattr(model, 'predict')):
+                    raise ValueError(f"Model object in {model_path} does not have a callable 'predict' method.")
