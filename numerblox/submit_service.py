@@ -1,14 +1,13 @@
 import os
 import time
+import shutil
 import pickle
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from numerapi import NumerAPI
 from numerblox.misc import Logger, Key
 from numerblox.download import NumeraiClassicDownloader
 from numerblox.submission import NumeraiClassicSubmitter
-from datetime import timedelta
-import shutil
 
 # Setup logger
 logger = Logger(log_dir='logs', log_file='submit_service.log').get_logger()
@@ -32,7 +31,6 @@ class SubmitService:
         self.submitter = NumeraiClassicSubmitter(directory_path=self.tmp_dir, key=self.key)
         self.cleanup = cleanup
         self.last_submitted_round = self._load_last_successful_round()
-
 
     def _load_last_successful_round(self):
         """Load the last successfully submitted round from disk, if it exists."""
@@ -114,7 +112,6 @@ class SubmitService:
         live_data = pd.read_parquet(os.path.join(self.tmp_dir, live_data_path, "live.parquet"))
         live_features = live_data[[col for col in live_data.columns if "feature" in col]]
 
-        all_successful = True
         for model_name, model_data in self.models.items():
             logger.info(f"Generating predictions for model '{model_name}'.")
             model_path = model_data["path"]
@@ -147,41 +144,37 @@ class SubmitService:
                 logger.error(f"Submission failed for model '{model_name}' after retries.")
                 return False
 
-        if all_successful:
-            # Save submission success
-            success_path = os.path.join(self.tmp_dir, live_data_path, "submission_success.txt")
-            timestamp = datetime.utcnow().isoformat()
-            content = f"Round: {current_round}\nTimestamp: {timestamp}\nModels: {', '.join(self.models.keys())}\n"
-            with open(success_path, "w") as file:
-                file.write(content)
-            logger.info(f"Submission success saved to {success_path} with details:\n{content}")
+        # Save submission success
+        success_path = os.path.join(self.tmp_dir, live_data_path, "submission_success.txt")
+        timestamp = datetime.utcnow().isoformat()
+        content = f"Round: {current_round}\nTimestamp: {timestamp}\nModels: {', '.join(self.models.keys())}\n"
+        with open(success_path, "w") as file:
+            file.write(content)
+        logger.info(f"Submission success saved to {success_path} with details:\n{content}")
 
-            # Save last successful round to a file
-            round_file_path = os.path.join(self.tmp_dir, "last_successful_round.txt")
-            with open(round_file_path, "w") as file:
-                file.write(str(current_round))
-            logger.info(f"Saved last successful round {current_round} to disk.")
-            self.last_submitted_round = current_round  # Update last submitted round in memory
+        # Save last successful round to a file
+        round_file_path = os.path.join(self.tmp_dir, "last_successful_round.txt")
+        with open(round_file_path, "w") as file:
+            file.write(str(current_round))
+        logger.info(f"Saved last successful round {current_round} to disk.")
+        self.last_submitted_round = current_round  # Update last submitted round in memory
 
-            # Clean up temporary files
-            if self.cleanup:
-                try:
-                    shutil.rmtree(os.path.join(self.tmp_dir, live_data_path))
-                    logger.info(f"Cleaned up temporary files for round {current_round}.")
-                except Exception as e:
-                    logger.error(f"Error cleaning up temporary files: {str(e)}")
+        # Clean up temporary files
+        if self.cleanup:
+            try:
+                shutil.rmtree(os.path.join(self.tmp_dir, live_data_path))
+                logger.info(f"Cleaned up temporary files for round {current_round}.")
+            except Exception as e:
+                logger.error(f"Error cleaning up temporary files: {str(e)}")
 
-            logger.info(f"Submission successful for all models in Numerai round {current_round}.")
-            return True
-        else:
-            logger.error("Submission process failed after multiple retries.")
-            return False
+        logger.info(f"Submission successful for all models in Numerai round {current_round}.")
+        return True
 
     def daemon(self, validate=True):
         if validate:
             self._validate_args()
 
-        logger.info(f"Starting NumerAI automated submission service. Active every {self.interval_minutes} minutes between {self.start_hour}:00 and {self.end_hour}:00 UTC on Tuesday to Saturday.")
+        logger.info(f"Starting NumerAI automated submission service. Active between {self.start_hour}:00 and {self.end_hour}:00 UTC on Tuesday to Saturday.")
 
         while True:
             current_time = datetime.utcnow()
@@ -203,7 +196,7 @@ class SubmitService:
                     hours, remainder = divmod(time_to_wait, 3600)
                     minutes, _ = divmod(remainder, 60)
 
-                    logger.info(f"Sleeping until {next_start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC ({next_start_time.strftime('%A')}) (in {int(hours)} hours and {int(minutes)} minutes) for the next submission.")
+                    logger.info(f"Sleeping until {next_start_time.strftime('%A')} {next_start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC (in {int(hours)} hours and {int(minutes)} minutes) for the next submission.")
                     time.sleep(time_to_wait)
 
                 else:
@@ -227,7 +220,7 @@ class SubmitService:
                 hours, remainder = divmod(time_to_wait, 3600)
                 minutes, _ = divmod(remainder, 60)
 
-                logger.info(f"Sleeping until {next_start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC ({next_start_time.strftime('%A')}) (in {int(hours)} hours and {int(minutes)} minutes) for the next submission.")
+                logger.info(f"Sleeping until {next_start_time.strftime('%A')} {next_start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC (in {int(hours)} hours and {int(minutes)} minutes) for the next submission.")
                 # Sleep until the calculated time
                 time.sleep(time_to_wait)
 
