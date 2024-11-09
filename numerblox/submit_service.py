@@ -1,7 +1,6 @@
 import os
 import time
 import pickle
-import schedule
 import pandas as pd
 from datetime import datetime
 from numerapi import NumerAPI
@@ -9,8 +8,7 @@ from numerblox.misc import Logger, Key
 from numerblox.download import NumeraiClassicDownloader
 from numerblox.submission import NumeraiClassicSubmitter
 from datetime import timedelta
-
-
+import shutil
 
 # Setup logger
 logger = Logger(log_dir='logs', log_file='submit_service.log').get_logger()
@@ -283,7 +281,7 @@ class SubmitService:
                 time.sleep(time_to_wait)
 
     def submit(self, validate=True):
-        logger.info("Initiating submission task.")
+        logger.info("Submit model predictions immediately.")
         if validate:
             self._validate_args()
         self.task()
