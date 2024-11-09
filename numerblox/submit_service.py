@@ -185,6 +185,11 @@ class SubmitService:
         return None
 
     def task(self):
+
+        if not self.check_new_round_with_retry():
+            logger.info(f"No new Numerai round detected.")
+            return False
+
         """Execute the task to check, download, generate, and submit predictions."""
         current_round = self.get_current_round_with_retry()
         if current_round is None:
@@ -195,10 +200,6 @@ class SubmitService:
         if self.last_submitted_round == current_round:
             logger.info(f"Already submitted for Numerai round {current_round}. Skipping.")
             return True
-
-        if not self.check_new_round_with_retry():
-            logger.info(f"No new Numerai round detected. Current round is {current_round}.")
-            return False
 
         live_data_path = f"live/{current_round}"
         logger.info(f"Starting data download and submission process for Numerai round {current_round}.")
