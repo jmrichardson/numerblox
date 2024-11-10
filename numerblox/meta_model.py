@@ -99,63 +99,86 @@ def numerai_corr_score(
     return corr_result
 
 
+from typing import Optional
+import numpy as np
+import pandas as pd
+from scipy import stats
+
+
 def mmc_score(
     targets: pd.Series,
     predictions: pd.Series,
     eras: pd.Series,
     meta_data: pd.Series,
-    sample_weight: pd.Series = None,
+    sample_weight: Optional[pd.Series] = None,
 ) -> float:
     """
-    Calculate the Mean Model Correlation (MMC) score, adjusted for orthogonality with meta data.
+    Calculate the Mean Model Correlation (MMC) score, adjusted for orthogonality with meta-data.
+
+    The MMC score is computed by orthogonalizing the model predictions with respect to the meta-data,
+    and then calculating the weighted correlation between the targets and the orthogonalized predictions
+    within each era. The final score is the mean of these per-era correlations.
 
     Args:
-        targets (pd.Series): Target values, expected to be in range [0, 1].
+        targets (pd.Series): Target values, expected to be in the range [0, 1].
         predictions (pd.Series): Model predictions.
-        eras (pd.Series): Era identifiers.
-        meta_data (pd.Series): Meta data for orthogonalization.
-        sample_weight (Optional[pd.Series]): Sample weights, if provided; otherwise assumed to be 1.
+        eras (pd.Series): Era identifiers for each sample.
+        meta_data (pd.Series): Meta-data used for orthogonalization.
+        sample_weight (Optional[pd.Series], optional): Sample weights for each observation.
+            If None, each sample is assigned a weight of 1. Defaults to None.
 
     Returns:
-        float: The mean MMC score, NaN if eras are insufficient for calculation.
+        float: The mean MMC score across eras. Returns NaN if there are insufficient eras for calculation.
+
+    Raises:
+        ValueError: If input series lengths do not match or if meta-data variance is zero.
     """
+
+    # Input validation
+    if not all(len(arr) == len(targets) for arr in [predictions, eras, meta_data]):
+        raise ValueError("All input Series must be of the same length.")
+
+    if sample_weight is not None and len(sample_weight) != len(targets):
+        raise ValueError("Sample weights must be of the same length as targets.")
+
     # Align sample weights with targets
     if sample_weight is not None:
-        sample_weight = sample_weight.reindex(targets.index)
+        sample_weight = sample_weight.reindex(targets.index).fillna(1.0)
+    else:
+        sample_weight = pd.Series(1.0, index=targets.index)
 
-    # Convert series to numpy arrays for optimized computations and ensure they are writable copies
-    targets_arr = targets.to_numpy(copy=True)
-    predictions_arr = predictions.to_numpy()
-    meta_data_arr = meta_data.to_numpy()
+    # Convert inputs to numpy arrays for optimized computations
+    targets_arr = targets.to_numpy(copy=True).astype(np.float64)
+    predictions_arr = predictions.to_numpy().astype(np.float64)
+    meta_data_arr = meta_data.to_numpy().astype(np.float64)
     eras_arr = eras.to_numpy()
+    sample_weight_arr = sample_weight.to_numpy().astype(np.float64)
 
-    # Step 2: Rank and gaussianize predictions and meta_data using scipy's rankdata
+    # Rank and gaussianize predictions and meta_data
     predictions_ranked = (stats.rankdata(predictions_arr, method='average') - 0.5) / len(predictions_arr)
     meta_data_ranked = (stats.rankdata(meta_data_arr, method='average') - 0.5) / len(meta_data_arr)
 
-    predictions_ranked = np.clip(predictions_ranked, 1e-6, 1 - 1e-6)
-    meta_data_ranked = np.clip(meta_data_ranked, 1e-6, 1 - 1e-6)
+    # Clip ranked data to avoid extremes and apply inverse normal transformation
+    predictions_clipped = np.clip(predictions_ranked, 1e-6, 1 - 1e-6)
+    meta_data_clipped = np.clip(meta_data_ranked, 1e-6, 1 - 1e-6)
 
-    predictions_gaussianized = stats.norm.ppf(predictions_ranked)
-    meta_data_gaussianized = stats.norm.ppf(meta_data_ranked)
+    predictions_gaussianized = stats.norm.ppf(predictions_clipped)
+    meta_data_gaussianized = stats.norm.ppf(meta_data_clipped)
 
-    # Step 3: Orthogonalize predictions with respect to meta_data
+    # Orthogonalize predictions with respect to meta_data
     m_dot_m = np.dot(meta_data_gaussianized, meta_data_gaussianized)
+    if m_dot_m == 0:
+        raise ValueError("Meta-data has zero variance; cannot orthogonalize.")
+
     projection = np.dot(predictions_gaussianized, meta_data_gaussianized) / m_dot_m
     neutral_preds = predictions_gaussianized - meta_data_gaussianized * projection
 
-    # Step 4: Adjust targets
+    # Adjust targets
     if np.all((targets_arr >= 0) & (targets_arr <= 1)):
-        targets_arr *= 4  # This line requires writable targets_arr
+        targets_arr *= 4
     targets_arr -= targets_arr.mean()
 
-    # Step 5: Prepare sample_weight
-    if sample_weight is not None:
-        sample_weight_arr = sample_weight.to_numpy()
-    else:
-        sample_weight_arr = np.ones_like(targets_arr)
-
-    # Step 6: Create DataFrame for grouping
+    # Create DataFrame for grouping
     df = pd.DataFrame({
         'targets': targets_arr,
         'neutral_preds': neutral_preds,
@@ -172,9 +195,10 @@ def mmc_score(
         return np.nan
 
     # Compute numerator and denominator per era
-    df['numerator'] = df['sample_weight'] * df['targets'] * df['neutral_preds']
     grouped = df.groupby('eras')
-    numerators = grouped['numerator'].sum()
+    numerators = grouped.apply(
+        lambda x: np.sum(x['sample_weight'] * x['targets'] * x['neutral_preds'])
+    )
     denominators = grouped['sample_weight'].sum()
 
     # Compute per-era MMC scores
@@ -184,6 +208,7 @@ def mmc_score(
     mmc_score = per_era_mmc.mean()
 
     return mmc_score
+
 
 
 def numerai_payout_score(
