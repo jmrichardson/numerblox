@@ -238,17 +238,24 @@ def get_sample_weights(
 
 
 class GreedyEnsemble:
-    def __init__(
-        self,
-        max_ensemble_size: int = 10,
-        metric: Union[str, Callable] = "corr",
-        use_replacement: bool = True,
-        sorted_initialization: bool = True,
-        initial_n: int = None,
-        num_bags: int = 50,
-        random_state: Union[int, None] = None
-    ):
+    """
+    A greedy ensemble model that selects base models for optimal weighted prediction.
 
+    Attributes:
+        weights_ (pd.Series): Final weights of the models in the ensemble.
+        selected_model_names_ (list): Names of selected models in the ensemble.
+    """
+
+    def __init__(
+            self,
+            max_ensemble_size: int = 10,
+            metric: Union[str, Callable] = "corr",
+            use_replacement: bool = True,
+            sorted_initialization: bool = True,
+            initial_n: Optional[int] = None,
+            num_bags: int = 50,
+            random_state: Optional[int] = None
+    ):
         self.max_ensemble_size = max_ensemble_size
         self.use_replacement = use_replacement
         self.sorted_initialization = sorted_initialization
@@ -259,6 +266,7 @@ class GreedyEnsemble:
         self.weights_ = None
         self.selected_model_names_ = None
 
+        # Configure metric
         if isinstance(metric, str):
             if metric == "corr":
                 self.metric = numerai_corr_score
@@ -267,18 +275,20 @@ class GreedyEnsemble:
             elif metric == "payout":
                 self.metric = numerai_payout_score
             else:
-                raise ValueError("Unsupported metric string. Choose 'corr', 'mmc', or 'payout'.")
+                raise ValueError("Unsupported metric. Choose 'corr', 'mmc', or 'payout'.")
         elif callable(metric):
             self.metric = metric
         else:
-            raise TypeError("Metric must be a string or a callable.")
+            raise TypeError("Metric must be a string or callable.")
 
-    def fit(
-            self,
-            oof: pd.DataFrame,
-            sample_weights: pd.Series = None
-    ):
+    def fit(self, oof: pd.DataFrame, sample_weights: Optional[pd.Series] = None) -> None:
+        """
+        Fits the ensemble using Out-of-Fold (OOF) predictions.
 
+        Args:
+            oof (pd.DataFrame): DataFrame containing OOF predictions, with columns 'target' and 'era'.
+            sample_weights (Optional[pd.Series]): Weights for samples in scoring.
+        """
         rng = check_random_state(self.random_state)
         oof_targets = oof['target']
         oof_eras = oof['era']
@@ -286,152 +296,109 @@ class GreedyEnsemble:
         oof_predictions = oof.drop(columns=['era', 'target', 'meta_data'], errors='ignore')
         model_names = oof_predictions.columns.tolist()
 
-        if self.max_ensemble_size < 1:
-            raise ValueError("max_ensemble_size cannot be less than one!")
-        if self.num_bags < 1:
-            raise ValueError("num_bags cannot be less than one!")
+        if self.max_ensemble_size < 1 or self.num_bags < 1:
+            raise ValueError("max_ensemble_size and num_bags must each be at least one.")
 
+        # Initialize predictions and variables to track the ensemble process
         current_ensemble_predictions = pd.Series(0.0, index=oof.index)
-        ensemble_indices = []
-        used_model_counts = Counter()
-
-        ensemble_scores = []
-        ensemble_sizes = []
+        ensemble_indices, used_model_counts = [], Counter()
+        ensemble_scores, ensemble_sizes = [], []
 
         if self.sorted_initialization:
-            model_scores = {}
-            for model_name in model_names:
-                predictions = oof_predictions[model_name]
-                score = self.metric(
-                    oof_targets,
-                    predictions,
-                    oof_eras,
-                    meta_data=meta_data,
-                    sample_weight=sample_weights
-                )
-                logger.info(f"Calculating initial sorted metric - Model: {model_name}: {score}")
-                model_scores[model_name] = score
+            # Compute initial model scores for sorted initialization
+            model_scores = {name: self.metric(
+                oof_targets, oof_predictions[name], oof_eras, meta_data=meta_data, sample_weight=sample_weights
+            ) for name in model_names}
 
             sorted_models = sorted(model_scores.items(), key=lambda x: x[1], reverse=True)
+            initial_size = self._determine_initial_n([score for _, score in sorted_models]) if self.initial_n is None else self.initial_n
+            initial_size = min(initial_size, self.max_ensemble_size)
 
-            if self.initial_n is None:
-                N = self._determine_initial_n([score for name, score in sorted_models])
-            else:
-                N = self.initial_n
-
-            N = min(N, self.max_ensemble_size)
-
-            for i in range(N):
-                model_name = sorted_models[i][0]
-                model_score = sorted_models[i][1]
+            for i in range(initial_size):
+                model_name, model_score = sorted_models[i]
                 current_ensemble_predictions += oof_predictions[model_name]
                 ensemble_indices.append(model_name)
                 used_model_counts[model_name] += 1
                 logger.info(f"Selected Model {i + 1}: {model_name} with score {model_score}")
 
-            current_ensemble_predictions /= N
-
-            initial_score = self.metric(
-                oof_targets,
-                current_ensemble_predictions,
-                oof_eras,
-                meta_data=meta_data,
-                sample_weight=sample_weights
-            )
+            current_ensemble_predictions /= initial_size
+            initial_score = self.metric(oof_targets, current_ensemble_predictions, oof_eras, meta_data=meta_data, sample_weight=sample_weights)
             ensemble_scores.append(initial_score)
             ensemble_sizes.append(len(ensemble_indices))
-            logger.info(f"Initial ensemble score with {len(ensemble_indices)} models ({', '.join(ensemble_indices)}): {initial_score}")
-        else:
-            # Initialize empty ensemble_scores and ensemble_sizes if no sorted initialization
-            ensemble_scores = []
-            ensemble_sizes = []
+            logger.info(f"Initial ensemble score with {len(ensemble_indices)} models: {initial_score}")
 
-        # Greedy addition of models to the ensemble
+        # Greedy addition to the ensemble
         while len(ensemble_indices) < self.num_bags:
             if len(used_model_counts) >= self.max_ensemble_size and not self.use_replacement:
-                break  # Reached maximum number of unique models
+                break  # Stop if max unique models reached
 
-            best_score = None
-            best_model_name = None
+            best_score, best_model_name = None, None
 
-            # Determine candidate models
-            if self.use_replacement:
-                candidate_model_names = model_names
-            else:
-                candidate_model_names = [name for name in model_names if name not in used_model_counts]
-
+            candidate_model_names = model_names if self.use_replacement else [name for name in model_names if name not in used_model_counts]
             if not candidate_model_names:
-                break  # No more candidates to consider
+                break  # Stop if no candidates left
 
-            # Evaluate each candidate model
+            # Evaluate each candidate model's score if added to the ensemble
             for model_name in candidate_model_names:
-                model_predictions = oof_predictions[model_name]
-                combined_predictions = (current_ensemble_predictions * len(ensemble_indices) + model_predictions) / (len(ensemble_indices) + 1)
-
-                # Calculate the score of the new ensemble
-                score = self.metric(
-                    oof_targets,
-                    combined_predictions,
-                    oof_eras,
-                    meta_data=meta_data,
-                    sample_weight=sample_weights
-                )
+                combined_predictions = (current_ensemble_predictions * len(ensemble_indices) + oof_predictions[model_name]) / (len(ensemble_indices) + 1)
+                score = self.metric(oof_targets, combined_predictions, oof_eras, meta_data=meta_data, sample_weight=sample_weights)
 
                 if best_score is None or score > best_score:
-                    best_score = score
-                    best_model_name = model_name
+                    best_score, best_model_name = score, model_name
 
-            if best_model_name is None:
-                break  # No improvement found
+            if not best_model_name:
+                break  # Stop if no improvement found
 
-            # Update ensemble with the best model
+            # Add the best model to the ensemble
             ensemble_indices.append(best_model_name)
             used_model_counts[best_model_name] += 1
             current_ensemble_predictions = (current_ensemble_predictions * (len(ensemble_indices) - 1) + oof_predictions[best_model_name]) / len(ensemble_indices)
 
             ensemble_scores.append(best_score)
             ensemble_sizes.append(len(ensemble_indices))
+            logger.info(f"Added model '{best_model_name}' with score {best_score}. Ensemble size: {len(ensemble_indices)}")
 
-            logger.info(f"Iteration {len(ensemble_sizes)}: Added model '{best_model_name}' with score {best_score}. Bag ensemble size: {len(ensemble_indices)}")
-
-            if len(used_model_counts) >= self.max_ensemble_size and not self.use_replacement:
-                break  # Reached maximum number of unique models
-
-        # Select the best ensemble size based on the highest score
-        if ensemble_scores:
-            max_score = max(ensemble_scores)
-            best_indices = [i for i, score in enumerate(ensemble_scores) if score == max_score]
-            best_index = best_indices[-1]  # Pick the last occurrence
+        # Final selection of the best ensemble size based on scores
+        max_score = max(ensemble_scores, default=None)
+        if max_score is not None:
+            best_index = [i for i, score in enumerate(ensemble_scores) if score == max_score][-1]
             best_ensemble_size = ensemble_sizes[best_index]
             best_ensemble_indices = ensemble_indices[:best_ensemble_size]
-            logger.info(f"Best bagged ensemble size: {best_ensemble_size} with score {ensemble_scores[best_index]}")
+            logger.info(f"Best ensemble size: {best_ensemble_size} with score {max_score}")
         else:
             best_ensemble_indices = []
 
-        # Calculate the final weights
+        # Set final model weights
         model_counts = Counter(best_ensemble_indices)
         total_counts = sum(model_counts.values()) or 1
-        weights = pd.Series({model_name: count / total_counts for model_name, count in model_counts.items()})
-        self.weights_ = weights.reindex(model_names).fillna(0.0)
+        self.weights_ = pd.Series({model_name: count / total_counts for model_name, count in model_counts.items()}).reindex(model_names).fillna(0.0)
         self.selected_model_names_ = self.weights_[self.weights_ > 0].index.tolist()
 
-    def _determine_initial_n(self, scores):
-        if len(scores) <= 1:
-            return 1
+    def _determine_initial_n(self, scores: list) -> int:
+        """
+        Determines initial number of models to include based on sorted scores.
 
-        threshold = 0.001  # You may adjust this threshold based on your needs
-        N = 1
-        for i in range(1, len(scores)):
-            improvement = scores[i - 1] - scores[i]
-            if improvement < threshold:
-                break
-            N += 1
-        return N
+        Args:
+            scores (list): List of model scores in descending order.
+
+        Returns:
+            int: Number of initial models to include.
+        """
+        threshold = 0.001  # Threshold for score improvement
+        return next((i for i in range(1, len(scores)) if scores[i - 1] - scores[i] < threshold), len(scores))
 
     def predict(self, base_models_predictions: pd.DataFrame) -> pd.Series:
+        """
+        Predicts ensemble output based on weighted base models.
+
+        Args:
+            base_models_predictions (pd.DataFrame): DataFrame of model predictions.
+
+        Returns:
+            pd.Series: Ensemble predictions as weighted sum.
+        """
         weighted_predictions = base_models_predictions.multiply(self.weights_, axis=1)
-        ensemble_predictions = weighted_predictions.sum(axis=1)
-        return ensemble_predictions
+        return weighted_predictions.sum(axis=1)
 
 
 class MetaModel(BaseEstimator, RegressorMixin):
