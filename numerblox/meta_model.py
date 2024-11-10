@@ -100,11 +100,11 @@ def numerai_corr_score(
 
 
 def mmc_score(
-        targets: pd.Series,
-        predictions: pd.Series,
-        eras: pd.Series,
-        meta_data: pd.Series,
-        sample_weight: Optional[pd.Series] = None
+    targets: pd.Series,
+    predictions: pd.Series,
+    eras: pd.Series,
+    meta_data: pd.Series,
+    sample_weight: pd.Series = None,
 ) -> float:
     """
     Calculate the Mean Model Correlation (MMC) score, adjusted for orthogonality with meta data.
@@ -122,49 +122,68 @@ def mmc_score(
     # Align sample weights with targets
     if sample_weight is not None:
         sample_weight = sample_weight.reindex(targets.index)
-        sample_weight_values = sample_weight.values
-    else:
-        sample_weight_values = np.ones_like(targets)
 
-    # Convert series to numpy arrays for optimized computations
-    targets_arr, predictions_arr = targets.values, predictions.values
-    meta_data_arr, eras_arr = meta_data.values, eras.values
+    # Convert series to numpy arrays for optimized computations and ensure they are writable copies
+    targets_arr = targets.to_numpy(copy=True)
+    predictions_arr = predictions.to_numpy()
+    meta_data_arr = meta_data.to_numpy()
+    eras_arr = eras.to_numpy()
 
-    # Rank and gaussianize predictions and meta_data
+    # Step 2: Rank and gaussianize predictions and meta_data using scipy's rankdata
     predictions_ranked = (stats.rankdata(predictions_arr, method='average') - 0.5) / len(predictions_arr)
     meta_data_ranked = (stats.rankdata(meta_data_arr, method='average') - 0.5) / len(meta_data_arr)
-    predictions_gaussianized = stats.norm.ppf(np.clip(predictions_ranked, 1e-6, 1 - 1e-6))
-    meta_data_gaussianized = stats.norm.ppf(np.clip(meta_data_ranked, 1e-6, 1 - 1e-6))
 
-    # Orthogonalize predictions with respect to meta_data
-    projection = np.dot(predictions_gaussianized, meta_data_gaussianized) / np.dot(meta_data_gaussianized, meta_data_gaussianized)
-    neutral_predictions = predictions_gaussianized - meta_data_gaussianized * projection
+    predictions_ranked = np.clip(predictions_ranked, 1e-6, 1 - 1e-6)
+    meta_data_ranked = np.clip(meta_data_ranked, 1e-6, 1 - 1e-6)
 
-    # Adjust targets scaling if in range [0, 1]
+    predictions_gaussianized = stats.norm.ppf(predictions_ranked)
+    meta_data_gaussianized = stats.norm.ppf(meta_data_ranked)
+
+    # Step 3: Orthogonalize predictions with respect to meta_data
+    m_dot_m = np.dot(meta_data_gaussianized, meta_data_gaussianized)
+    projection = np.dot(predictions_gaussianized, meta_data_gaussianized) / m_dot_m
+    neutral_preds = predictions_gaussianized - meta_data_gaussianized * projection
+
+    # Step 4: Adjust targets
     if np.all((targets_arr >= 0) & (targets_arr <= 1)):
-        targets_arr *= 4
+        targets_arr *= 4  # This line requires writable targets_arr
     targets_arr -= targets_arr.mean()
 
-    # Construct DataFrame to facilitate per-era calculations
+    # Step 5: Prepare sample_weight
+    if sample_weight is not None:
+        sample_weight_arr = sample_weight.to_numpy()
+    else:
+        sample_weight_arr = np.ones_like(targets_arr)
+
+    # Step 6: Create DataFrame for grouping
     df = pd.DataFrame({
         'targets': targets_arr,
-        'neutral_predictions': neutral_predictions,
+        'neutral_preds': neutral_preds,
         'eras': eras_arr,
-        'sample_weight': sample_weight_values
+        'sample_weight': sample_weight_arr
     })
 
-    # Filter out eras with fewer than 2 samples
-    valid_eras = df['eras'].value_counts()[lambda x: x >= 2].index
+    # Filter out eras with less than 2 samples
+    era_counts = df['eras'].value_counts()
+    valid_eras = era_counts[era_counts >= 2].index
     df = df[df['eras'].isin(valid_eras)]
+
     if df.empty:
         return np.nan
 
-    # Compute MMC per era
-    df['numerator'] = df['sample_weight'] * df['targets'] * df['neutral_predictions']
+    # Compute numerator and denominator per era
+    df['numerator'] = df['sample_weight'] * df['targets'] * df['neutral_preds']
     grouped = df.groupby('eras')
-    per_era_mmc = grouped['numerator'].sum() / grouped['sample_weight'].sum()
+    numerators = grouped['numerator'].sum()
+    denominators = grouped['sample_weight'].sum()
 
-    return per_era_mmc.mean()
+    # Compute per-era MMC scores
+    per_era_mmc = numerators / denominators
+
+    # Compute the mean MMC score
+    mmc_score = per_era_mmc.mean()
+
+    return mmc_score
 
 
 def numerai_payout_score(
@@ -428,7 +447,7 @@ class MetaModel(BaseEstimator, RegressorMixin):
         self.ensemble_model = None
         self.weights_ = None
 
-    def fit(self, oof: pd.DataFrame, models: Dict[str, Dict[str, Any]], ensemble_method: Any) -> 'MetaModel':
+    def fit(self, oof: pd.DataFrame, models: Dict[str, Dict[str, Any]], ensemble_method: Callable[..., Any] = GreedyEnsemble) -> 'MetaModel':
         """
         Fit the meta-model by selecting and ensembling the best models based on OOF predictions.
 
