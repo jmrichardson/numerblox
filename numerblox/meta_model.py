@@ -1,14 +1,13 @@
-from sklearn.base import BaseEstimator, RegressorMixin
-from sklearn.ensemble import VotingRegressor
 import pickle
 import numpy as np
 import pandas as pd
 from collections import Counter
-from typing import Callable, Union
-from sklearn.utils import check_random_state
 from scipy import stats
 from .misc import Logger
-from typing import Optional, Union, Dict, Any
+from typing import Callable, Optional, Union, Dict, Any
+from sklearn.base import BaseEstimator, RegressorMixin
+from sklearn.ensemble import VotingRegressor
+from sklearn.utils import check_random_state
 
 # Setup logger
 logger = Logger(log_dir='logs', log_file='meta_model.log').get_logger()
@@ -18,7 +17,7 @@ def numerai_corr_score(
     targets: pd.Series,
     predictions: pd.Series,
     eras: pd.Series,
-    meta_data: Optional[dict] = None,
+    meta_data: Optional[dict] = None,  # required
     sample_weight: Optional[pd.Series] = None
 ) -> float:
     """
@@ -28,7 +27,6 @@ def numerai_corr_score(
     - targets (pd.Series): Series of true target values.
     - predictions (pd.Series): Series of predicted values.
     - eras (pd.Series): Series indicating the era of each observation.
-    - meta_data (Optional[dict]): Optional metadata for additional information.
     - sample_weight (Optional[pd.Series]): Optional series of weights for each prediction.
 
     Returns:
@@ -97,12 +95,6 @@ def numerai_corr_score(
         corr_result = np.corrcoef(weighted_preds, weighted_target)[0, 1]
 
     return corr_result
-
-
-from typing import Optional
-import numpy as np
-import pandas as pd
-from scipy import stats
 
 
 def mmc_score(
@@ -208,7 +200,6 @@ def mmc_score(
     mmc_score = per_era_mmc.mean()
 
     return mmc_score
-
 
 
 def numerai_payout_score(
@@ -565,4 +556,3 @@ class MetaModel(BaseEstimator, RegressorMixin):
 
         predictions = self.ensemble_model.predict(X)
         return pd.Series(predictions, index=X.index)
-
