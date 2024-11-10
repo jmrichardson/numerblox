@@ -8,7 +8,7 @@ from typing import Callable, Union
 from sklearn.utils import check_random_state
 from scipy import stats
 from .misc import Logger
-from typing import Optional, Union
+from typing import Optional, Union, Dict, Any
 
 # Setup logger
 logger = Logger(log_dir='logs', log_file='meta_model.log').get_logger()
@@ -435,82 +435,123 @@ class GreedyEnsemble:
 
 
 class MetaModel(BaseEstimator, RegressorMixin):
-    def __init__(self, max_ensemble_size: int = 15, num_bags=50, random_state: int = 42, weight_factor: float = None, metric='corr'):
-        self.metric = metric
+    """
+    MetaModel class for ensemble learning using out-of-fold (OOF) predictions.
+    This model selects the best subset of models based on a specified metric and
+    combines them into a weighted ensemble.
+
+    Attributes:
+        max_ensemble_size (int): Maximum number of models to include in the ensemble.
+        num_bags (int): Number of bagging iterations.
+        random_state (int): Random state for reproducibility.
+        weight_factor (Optional[float]): Factor for sample weighting.
+        metric (str): Performance metric for ensemble optimization.
+        selected_model_names (list): List of selected models for the ensemble.
+        ensemble_model (VotingRegressor): The final ensemble model.
+    """
+
+    def __init__(self, max_ensemble_size: int = 15, num_bags: int = 50, random_state: int = 42,
+                 weight_factor: Optional[float] = None, metric: str = 'corr'):
         self.max_ensemble_size = max_ensemble_size
         self.num_bags = num_bags
         self.random_state = random_state
-        self.weight_factor = weight_factor  # Weight factor used in sample weighting
-        self.selected_model_names = []  # List to store the names of selected models
+        self.weight_factor = weight_factor
+        self.metric = metric
+        self.selected_model_names = []
         self.ensemble_model = None
+        self.weights_ = None
 
-    def fit(self, oof, models, ensemble_method=GreedyEnsemble):
+    def fit(self, oof: pd.DataFrame, models: Dict[str, Dict[str, Any]], ensemble_method: Any) -> 'MetaModel':
+        """
+        Fit the meta-model by selecting and ensembling the best models based on OOF predictions.
 
+        Args:
+            oof (pd.DataFrame): Out-of-fold predictions with columns ['era', 'target', 'meta_data'].
+            models (dict): Dictionary of models with model names as keys and model metadata.
+            ensemble_method: Class implementing the ensemble selection algorithm.
+
+        Returns:
+            self: Fitted meta-model.
+        """
+        # Validate input data
         if oof.isnull().values.any():
-            raise ValueError("Out of fold predictions contains NaN values.")
-
-        if not all(col in oof.columns for col in ['era', 'target', 'meta_data']):
-            raise KeyError("The dataframe is missing 'era', 'target' or 'meta_data' columns.")
-
+            raise ValueError("Out-of-fold predictions contain NaN values.")
+        required_cols = {'era', 'target', 'meta_data'}
+        if not required_cols.issubset(oof.columns):
+            raise KeyError(f"Dataframe is missing columns: {required_cols - set(oof.columns)}")
         if not isinstance(models, dict):
-            raise TypeError("The 'models' variable must be a dictionary.")
+            raise TypeError("Expected 'models' to be a dictionary.")
 
-        # Scale oof predictions to [0, 1]
-        oof_predictions = oof.drop(columns=['era', 'target', 'meta_data'], errors='ignore')
-        oof_predictions = oof_predictions.apply(lambda x: (x - x.min()) / (x.max() - x.min()), axis=0)
-
-        # Reinsert scaled predictions into oof DataFrame
+        # Scale predictions to [0, 1]
+        oof_predictions = oof.drop(columns=required_cols, errors='ignore')
         oof_scaled = oof.copy()
-        oof_scaled.update(oof_predictions)
+        oof_scaled.update(oof_predictions.apply(lambda x: (x - x.min()) / (x.max() - x.min()), axis=0))
 
-        # If weight_factor is provided, calculate sample weights based on eras
+        # Compute sample weights if weight_factor is set
+        sample_weights = None
         if self.weight_factor is not None:
-            logger.info(f"Generating sample weights - Weight factor: {self.weight_factor}")
-            sample_weights = get_sample_weights(oof_scaled.drop(columns=['era', 'target', 'meta_data'], errors='ignore'), wfactor=self.weight_factor, eras=oof_scaled['era'])
-        else:
-            sample_weights = None
+            logger.info(f"Generating sample weights with weight factor: {self.weight_factor}")
+            sample_weights = get_sample_weights(
+                oof_scaled.drop(columns=required_cols, errors='ignore'),
+                wfactor=self.weight_factor,
+                eras=oof_scaled['era']
+            )
 
-        # Instantiate ensemble
+        # Initialize and fit ensemble method
         if isinstance(ensemble_method, type):
-            ensemble_method = ensemble_method(max_ensemble_size=self.max_ensemble_size, num_bags=self.num_bags, metric=self.metric, random_state=self.random_state)
+            ensemble_method = ensemble_method(
+                max_ensemble_size=self.max_ensemble_size,
+                num_bags=self.num_bags,
+                metric=self.metric,
+                random_state=self.random_state
+            )
 
-        # Fit the ensemble method with scaled predictions, true targets, and sample weights
-        logger.info(f"Ensembling out of sample predictions - Metric: {self.metric}")
+        logger.info(f"Ensembling out-of-sample predictions using metric: {self.metric}")
         ensemble_method.fit(oof_scaled, sample_weights=sample_weights)
 
-        # Get the names of the selected models and their weights
+        # Store selected model names and weights
         self.selected_model_names = ensemble_method.selected_model_names_
         self.weights_ = ensemble_method.weights_
 
-        # Load the selected models from disk
-        logger.info(f"Generating meta model")
-        selected_models = []
-        for model_name in self.selected_model_names:
-            model_path = models[model_name]['model_path']
-            with open(model_path, 'rb') as f:
-                model = pickle.load(f)  # Load the model from the file
-            selected_models.append((model_name, model))  # Add the model to the list
-
-        # Prepare the final VotingRegressor ensemble model
-        weights_list = []
+        # Load models and prepare ensemble
+        logger.info("Building ensemble model with selected models.")
         estimators_list = []
-        models = []
-        for model_name, model in selected_models:
-            weight = self.weights_.loc[model_name]  # Get the weight for the model
-            weights_list.append(weight)  # Add the weight to the list
-            logger.info(f"Adding model - Model: {model_name}, Weight: {weight}")
-            estimators_list.append((model_name, model))  # Add the model and its name to the list
-            models.append(model)
+        weights_list = []
 
-        # Create the VotingRegressor with the selected models and their corresponding weights
+        for model_name in self.selected_model_names:
+            model_info = models.get(model_name)
+            if not model_info:
+                raise KeyError(f"Model '{model_name}' not found in provided models dictionary.")
+
+            model_path = model_info.get('model_path')
+            if not model_path:
+                raise ValueError(f"Model '{model_name}' has no associated 'model_path'.")
+
+            with open(model_path, 'rb') as f:
+                model = pickle.load(f)
+
+            weight = self.weights_.loc[model_name]
+            logger.info(f"Adding model '{model_name}' with weight {weight:.4f}")
+            estimators_list.append((model_name, model))
+            weights_list.append(weight)
+
+        # Create and store the VotingRegressor ensemble model
         self.ensemble_model = VotingRegressor(estimators=estimators_list, weights=weights_list)
-        self.ensemble_model.estimators_ = models
-
         return self
 
     def predict(self, X: pd.DataFrame) -> pd.Series:
-        # Use the ensemble model to predict and return the results as a pandas Series
-        results = pd.Series(self.ensemble_model.predict(X), index=X.index)
-        return results
+        """
+        Predict using the ensemble model.
 
+        Args:
+            X (pd.DataFrame): Input features for prediction.
+
+        Returns:
+            pd.Series: Predictions from the ensemble model.
+        """
+        if self.ensemble_model is None:
+            raise ValueError("The ensemble model has not been fitted yet.")
+
+        predictions = self.ensemble_model.predict(X)
+        return pd.Series(predictions, index=X.index)
 
