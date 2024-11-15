@@ -519,6 +519,7 @@ class MetaModel(BaseEstimator, RegressorMixin):
         logger.info("Building ensemble model with selected models.")
         estimators_list = []
         weights_list = []
+        fitted_models = []
 
         for model_name in self.selected_model_names:
             model_info = models.get(model_name)
@@ -536,9 +537,12 @@ class MetaModel(BaseEstimator, RegressorMixin):
             logger.info(f"Adding model '{model_name}' with weight {weight:.4f}")
             estimators_list.append((model_name, model))
             weights_list.append(weight)
+            fitted_models.append(model)
 
         # Create and store the VotingRegressor ensemble model
         self.ensemble_model = VotingRegressor(estimators=estimators_list, weights=weights_list)
+        self.ensemble_model.estimators_ = fitted_models
+
         return self
 
     def predict(self, X: pd.DataFrame) -> pd.Series:
