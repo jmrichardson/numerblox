@@ -171,7 +171,7 @@ class NumTreesOptimizer:
 
         return np.mean(scores)
 
-    def plot_learning_curve(self):
+    def plot_learning_curve(self, save_path="tmp/learning_curve.png"):
         n_estimators_list, scores = zip(*self.history)
         plt.figure(figsize=(10, 6))
         plt.plot(n_estimators_list, scores, marker='o')
@@ -180,6 +180,7 @@ class NumTreesOptimizer:
         plt.ylabel("Validation Score")
         plt.title("Learning Curve")
         plt.legend()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.show()
 
     def get_best_model(self):
