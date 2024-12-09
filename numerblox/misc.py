@@ -79,12 +79,6 @@ class Logger:
     def __init__(self, log_dir='logs', log_file=None):
         os.makedirs(log_dir, exist_ok=True)
 
-        if log_file is None:
-            log_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-            log_file = f'numberblox_{log_time}.log'
-
-        log_path = os.path.join(log_dir, log_file)
-
         self.logger = logging.getLogger('numerblox_logger')
         self.logger.setLevel(logging.DEBUG)
         self.logger.propagate = False
@@ -92,21 +86,24 @@ class Logger:
         # Remove existing handlers to prevent duplication
         self.logger.handlers.clear()
 
-        # Set up console and file handlers
+        # Set up console handler
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.INFO)
 
-        file_handler = logging.FileHandler(log_path)
-        file_handler.setLevel(logging.INFO)
-
-        # Apply a consistent formatter to both handlers
+        # Apply a consistent formatter to the console handler
         formatter = logging.Formatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
         console_handler.setFormatter(formatter)
-        file_handler.setFormatter(formatter)
 
-        # Attach handlers
+        # Attach console handler
         self.logger.addHandler(console_handler)
-        self.logger.addHandler(file_handler)
+
+        # Add file handler only if log_file is provided
+        if log_file is not None:
+            log_path = os.path.join(log_dir, log_file)
+            file_handler = logging.FileHandler(log_path)
+            file_handler.setLevel(logging.INFO)
+            file_handler.setFormatter(formatter)
+            self.logger.addHandler(file_handler)
 
     def get_logger(self):
         return self.logger
